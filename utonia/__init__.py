@@ -14,6 +14,7 @@
 
 
 from .model import load
+from .tracker import UtoniaTracker
 
 from . import model
 from . import module
@@ -22,5 +23,16 @@ from . import data
 from . import transform
 from . import utils
 from . import registry
+from . import tracker
 
-__all__ = ["load", "model", "module", "structure", "transform", "registry", "utils"]
+__all__ = [
+    "load",
+    "UtoniaTracker",
+    "model",
+    "module",
+    "structure",
+    "transform",
+    "registry",
+    "utils",
+    "tracker",
+]

@@ -26,8 +26,6 @@ dependencies:
   - open3d  # for demo visualization
   - matplotlib  # for demo visualization
   - pip:
-    - torch-scatter --find-links https://data.pyg.org/whl/torch-2.5.0+cu124.html
-    - git+https://github.com/Dao-AILab/flash-attention.git
     - spconv-cu124 
     - opencv-python
     - camtools
@@ -35,3 +33,6 @@ dependencies:
     - natsort
     - gradio
     - einops
+
+# pip install --only-binary=:all: -f https://data.pyg.org/whl/torch-2.5.0+cu124.html torch-scatter
+# pip install --no-build-isolation flash-attn==2.7.4.post1
