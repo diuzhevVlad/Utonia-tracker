@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -6,43 +8,65 @@ from .model import load
 from . import transform
 
 
+@dataclass
+class TrackerState:
+    prototype: torch.Tensor | None = None
+    centroid: torch.Tensor | None = None
+    velocity: torch.Tensor | None = None
+    seed_index: int | None = None
+
+
 class UtoniaTracker:
     def __init__(
         self,
-        model=None,
-        device=None,
-        scale=0.2,
-        init_radius=0.8,
-        cluster_radius=1.2,
-        gate_radius=4.0,
-        sim_threshold=0.6,
-        init_points=64,
-        min_points=64,
-        spatial_weight=0.5,
-        proto_momentum=0.9,
-    ):
+        model: torch.nn.Module | None = None,
+        device: str | None = None,
+        scale: float = 0.2,
+        init_radius: float = 0.8,
+        alpha: float = 0.9,
+        cluster_radius: float = 1.2,
+        gate_radius: float = 4.0,
+        sim_threshold: float = 0.6,
+        init_points: int = 64,
+        min_points: int = 64,
+        proto_momentum: float = 0.9,
+    ) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = model or load(
-            "utonia",
-            repo_id="Pointcept/Utonia",
-            custom_config={"enc_patch_size": [1024] * 5, "enable_flash": False},
-        ).to(self.device)
-        self.model.eval()
-        self.transform = transform.default(scale, apply_z_positive=False)
+        self.scale = scale
         self.init_radius = init_radius
+        self.alpha = alpha
         self.cluster_radius = cluster_radius
         self.gate_radius = gate_radius
         self.sim_threshold = sim_threshold
         self.init_points = init_points
         self.min_points = min_points
-        self.spatial_weight = spatial_weight
         self.proto_momentum = proto_momentum
-        self.prototype = None
-        self.centroid = None
-        self.velocity = None
-        self.seed_index = None
+        self.model = model
+        self.transform = None
+        self.state = TrackerState()
 
-    def _prepare(self, coord):
+    def _ensure_ready(self) -> None:
+        if self.model is None:
+            self.build_model()
+        if self.transform is None:
+            self.build_transform()
+
+    def build_model(self) -> None:
+        """Load the pretrained Utonia encoder used to extract per-point features."""
+        self.model = load(
+            "utonia",
+            repo_id="Pointcept/Utonia",
+            custom_config={"enc_patch_size": [1024] * 5, "enable_flash": False},
+        ).to(self.device)
+        self.model.eval()
+
+    def build_transform(self) -> None:
+        """Create the fixed preprocessing pipeline applied to every LiDAR frame."""
+        self.transform = transform.default(self.scale, apply_z_positive=False)
+
+    def preprocess(self, coord: np.ndarray) -> dict[str, torch.Tensor]:
+        """Convert raw XYZ points into the dictionary format expected by Utonia."""
+        self._ensure_ready()
         point = {
             "coord": coord.copy(),
             "color": np.zeros_like(coord),
@@ -50,12 +74,12 @@ class UtoniaTracker:
         }
         return self.transform(point)
 
-    def _encode(self, coord):
-        point = self._prepare(coord)
+    def encode_frame(self, coord: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode one frame and return original-frame coordinates with normalized features."""
+        point = self.preprocess(coord)
         with torch.inference_mode():
             for key, value in point.items():
-                if isinstance(value, torch.Tensor) and self.device == "cuda":
-                    point[key] = value.cuda(non_blocking=True)
+                point[key] = value.to(self.device)
             point = self.model(point)
             for _ in range(2):
                 parent = point.pop("pooling_parent")
@@ -68,65 +92,103 @@ class UtoniaTracker:
                 parent.feat = point.feat[inverse]
                 point = parent
             feat = F.normalize(point.feat[point.inverse], dim=1)
-        coord = torch.as_tensor(coord, dtype=torch.float32, device=feat.device)
-        return coord, feat
+        coord_t = torch.as_tensor(coord, dtype=torch.float32, device=self.device)
+        return coord_t, feat
 
-    def initialize(self, coord, query_xyz):
-        coord, feat = self._encode(coord)
-        query_xyz = torch.as_tensor(query_xyz, dtype=torch.float32, device=coord.device)
-        dist2 = torch.sum((coord - query_xyz) ** 2, dim=1)
-        self.seed_index = torch.argmin(dist2)
-        mask = dist2.sqrt() < self.init_radius
+    def initialize(
+        self, coord: np.ndarray, query_xyz: np.ndarray | list[float]
+    ) -> dict[str, np.ndarray | int]:
+        """Initialize the track from a query point and return visualization-friendly outputs."""
+        coord_t, feat = self.encode_frame(coord)
+        query_t = torch.as_tensor(query_xyz, dtype=torch.float32, device=self.device)
+        dist = torch.linalg.norm(coord_t - query_t, dim=1)
+        self.state.seed_index = int(torch.argmin(dist).detach().cpu())
+        mask = dist < self.init_radius
         if int(mask.sum()) < self.init_points:
             topk = torch.topk(
-                dist2, k=min(self.init_points, dist2.numel()), largest=False
+                dist, k=min(self.init_points, dist.numel()), largest=False
             ).indices
             mask = torch.zeros_like(mask)
             mask[topk] = True
-        self.centroid = coord[mask].mean(0)
-        self.velocity = torch.zeros(3, device=coord.device)
-        self.prototype = F.normalize(feat[mask].mean(0), dim=0)
-        sim = feat @ self.prototype
+        self.state.prototype = F.normalize(feat[mask].mean(0), dim=0)
+        self.state.centroid = coord_t[mask].mean(0)
+        self.state.velocity = torch.zeros(3, dtype=torch.float32, device=self.device)
+        sim = feat @ self.state.prototype
         return {
-            "coord": coord.detach().cpu().numpy(),
+            "coord": coord_t.detach().cpu().numpy(),
             "sim": sim.detach().cpu().numpy(),
             "mask": mask.detach().cpu().numpy(),
-            "centroid": self.centroid.detach().cpu().numpy(),
-            "seed_index": int(self.seed_index.detach().cpu()),
+            "centroid": self.state.centroid.detach().cpu().numpy(),
+            "seed_index": self.state.seed_index,
         }
 
-    def step(self, coord):
-        coord, feat = self._encode(coord)
-        pred = self.centroid + self.velocity
-        dist_pred = torch.linalg.norm(coord - pred, dim=1)
-        sim = feat @ self.prototype
-        combined = sim - self.spatial_weight * (dist_pred / self.gate_radius)
-        combined[dist_pred > self.gate_radius] = -1e9
-        if torch.all(dist_pred > self.gate_radius):
-            combined = sim
-        anchor = torch.argmax(combined)
-        dist_anchor = torch.linalg.norm(coord - coord[anchor], dim=1)
-        mask = (dist_anchor < self.cluster_radius) & (sim > self.sim_threshold)
+    def predict_position(self) -> torch.Tensor:
+        """Predict the next centroid with a constant-velocity motion model."""
+        return self.state.centroid + self.state.velocity
+
+    def score_points(self, coord: torch.Tensor, feat: torch.Tensor) -> torch.Tensor:
+        """Combine appearance similarity and motion gating into one score per point."""
+        sim = feat @ self.state.prototype
+        dist = torch.linalg.norm(coord - self.predict_position(), dim=1)
+        score = sim - self.alpha * (dist / self.gate_radius)
+        score[dist > self.gate_radius] = -1e9
+        if torch.all(dist > self.gate_radius):
+            score = sim
+        return score
+
+    def extract_target(
+        self, coord: torch.Tensor, sim: torch.Tensor, score: torch.Tensor
+    ) -> torch.Tensor:
+        """Build a target mask around the highest-scoring anchor point."""
+        anchor = torch.argmax(score)
+        mask = (
+            torch.linalg.norm(coord - coord[anchor], dim=1) < self.cluster_radius
+        ) & (sim > self.sim_threshold)
         if int(mask.sum()) < self.min_points:
-            topk = torch.topk(
-                combined, k=min(self.min_points, combined.numel())
-            ).indices
+            topk = torch.topk(score, k=min(self.min_points, score.numel())).indices
             mask = torch.zeros_like(mask)
             mask[topk] = True
-        weight = sim[mask].clamp_min(0) + 1e-6
-        new_centroid = (coord[mask] * weight[:, None]).sum(0) / weight.sum()
-        new_prototype = F.normalize((feat[mask] * weight[:, None]).sum(0), dim=0)
-        self.velocity = new_centroid - self.centroid
-        self.centroid = new_centroid
-        self.prototype = F.normalize(
-            self.proto_momentum * self.prototype
+        return mask
+
+    def update_state(
+        self, coord: torch.Tensor, feat: torch.Tensor, mask: torch.Tensor
+    ) -> None:
+        """Update centroid, velocity, and prototype from the selected target points."""
+        old_centroid = self.state.centroid.clone()
+        old_prototype = self.state.prototype.clone()
+        weight = (feat[mask] @ old_prototype).clamp_min(0) + 1e-6
+        self.state.centroid = (
+            torch.sum(coord[mask] * weight[:, None], dim=0) / weight.sum()
+        )
+        self.state.velocity = self.state.centroid - old_centroid
+        new_prototype = torch.sum(feat[mask] * weight[:, None], dim=0)
+        self.state.prototype = F.normalize(
+            self.proto_momentum * old_prototype
             + (1.0 - self.proto_momentum) * new_prototype,
             dim=0,
         )
+
+    def step(self, coord: np.ndarray) -> dict[str, np.ndarray | int]:
+        """Track the target in one new frame and return values useful for visualization."""
+        coord_t, feat = self.encode_frame(coord)
+        sim = feat @ self.state.prototype
+        score = self.score_points(coord_t, feat)
+        mask = self.extract_target(coord_t, sim, score)
+        self.update_state(coord_t, feat, mask)
+        anchor_index = int(torch.argmax(score).detach().cpu())
         return {
-            "coord": coord.detach().cpu().numpy(),
+            "coord": coord_t.detach().cpu().numpy(),
             "sim": sim.detach().cpu().numpy(),
             "mask": mask.detach().cpu().numpy(),
-            "centroid": self.centroid.detach().cpu().numpy(),
-            "anchor_index": int(anchor.detach().cpu()),
+            "centroid": self.state.centroid.detach().cpu().numpy(),
+            "anchor_index": anchor_index,
         }
+
+    def track_sequence(
+        self, frames: list[np.ndarray], query_xyz: np.ndarray | list[float]
+    ) -> list[dict[str, np.ndarray | int]]:
+        """Run tracking over a list of frames and return per-frame outputs."""
+        states = [self.initialize(frames[0], query_xyz)]
+        for frame in frames[1:]:
+            states.append(self.step(frame))
+        return states
