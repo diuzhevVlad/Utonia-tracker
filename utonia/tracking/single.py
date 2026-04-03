@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .model import load
-from . import transform
+from .encoder import UtoniaFrameEncoder
 
 
 @dataclass
@@ -31,7 +32,8 @@ class UtoniaTracker:
         min_points: int = 64,
         proto_momentum: float = 0.9,
     ) -> None:
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.encoder = UtoniaFrameEncoder(model=model, device=device, scale=scale)
+        self.device = self.encoder.device
         self.scale = scale
         self.init_radius = init_radius
         self.alpha = alpha
@@ -41,64 +43,39 @@ class UtoniaTracker:
         self.init_points = init_points
         self.min_points = min_points
         self.proto_momentum = proto_momentum
-        self.model = model
-        self.transform = None
         self.state = TrackerState()
 
-    def _ensure_ready(self) -> None:
-        if self.model is None:
-            self.build_model()
-        if self.transform is None:
-            self.build_transform()
+    @property
+    def model(self) -> torch.nn.Module | None:
+        return self.encoder.model
+
+    @model.setter
+    def model(self, value: torch.nn.Module | None) -> None:
+        self.encoder.model = value
+
+    @property
+    def transform(self):
+        return self.encoder.transform
+
+    @transform.setter
+    def transform(self, value) -> None:
+        self.encoder.transform = value
 
     def build_model(self) -> None:
-        """Load the pretrained Utonia encoder used to extract per-point features."""
-        self.model = load(
-            "utonia",
-            repo_id="Pointcept/Utonia",
-            custom_config={"enc_patch_size": [1024] * 5, "enable_flash": False},
-        ).to(self.device)
-        self.model.eval()
+        self.encoder.build_model()
 
     def build_transform(self) -> None:
-        """Create the fixed preprocessing pipeline applied to every LiDAR frame."""
-        self.transform = transform.default(self.scale, apply_z_positive=False)
+        self.encoder.build_transform()
 
     def preprocess(self, coord: np.ndarray) -> dict[str, torch.Tensor]:
-        """Convert raw XYZ points into the dictionary format expected by Utonia."""
-        self._ensure_ready()
-        point = {
-            "coord": coord.copy(),
-            "color": np.zeros_like(coord),
-            "normal": np.zeros_like(coord),
-        }
-        return self.transform(point)
+        return self.encoder.preprocess(coord)
 
     def encode_frame(self, coord: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode one frame and return original-frame coordinates with normalized features."""
-        point = self.preprocess(coord)
-        with torch.inference_mode():
-            for key, value in point.items():
-                point[key] = value.to(self.device)
-            point = self.model(point)
-            for _ in range(2):
-                parent = point.pop("pooling_parent")
-                inverse = point.pop("pooling_inverse")
-                parent.feat = torch.cat([parent.feat, point.feat[inverse]], dim=-1)
-                point = parent
-            while "pooling_parent" in point:
-                parent = point.pop("pooling_parent")
-                inverse = point.pop("pooling_inverse")
-                parent.feat = point.feat[inverse]
-                point = parent
-            feat = F.normalize(point.feat[point.inverse], dim=1)
-        coord_t = torch.as_tensor(coord, dtype=torch.float32, device=self.device)
-        return coord_t, feat
+        return self.encoder.encode_frame(coord)
 
     def initialize(
         self, coord: np.ndarray, query_xyz: np.ndarray | list[float]
     ) -> dict[str, np.ndarray | int]:
-        """Initialize the track from a query point and return visualization-friendly outputs."""
         coord_t, feat = self.encode_frame(coord)
         query_t = torch.as_tensor(query_xyz, dtype=torch.float32, device=self.device)
         dist = torch.linalg.norm(coord_t - query_t, dim=1)
@@ -106,7 +83,9 @@ class UtoniaTracker:
         mask = dist < self.init_radius
         if int(mask.sum()) < self.init_points:
             topk = torch.topk(
-                dist, k=min(self.init_points, dist.numel()), largest=False
+                dist,
+                k=min(self.init_points, dist.numel()),
+                largest=False,
             ).indices
             mask = torch.zeros_like(mask)
             mask[topk] = True
@@ -123,11 +102,9 @@ class UtoniaTracker:
         }
 
     def predict_position(self) -> torch.Tensor:
-        """Predict the next centroid with a constant-velocity motion model."""
         return self.state.centroid + self.state.velocity
 
     def score_points(self, coord: torch.Tensor, feat: torch.Tensor) -> torch.Tensor:
-        """Combine appearance similarity and motion gating into one score per point."""
         sim = feat @ self.state.prototype
         dist = torch.linalg.norm(coord - self.predict_position(), dim=1)
         score = sim - self.alpha * (dist / self.gate_radius)
@@ -137,9 +114,11 @@ class UtoniaTracker:
         return score
 
     def extract_target(
-        self, coord: torch.Tensor, sim: torch.Tensor, score: torch.Tensor
+        self,
+        coord: torch.Tensor,
+        sim: torch.Tensor,
+        score: torch.Tensor,
     ) -> torch.Tensor:
-        """Build a target mask around the highest-scoring anchor point."""
         anchor = torch.argmax(score)
         mask = (
             torch.linalg.norm(coord - coord[anchor], dim=1) < self.cluster_radius
@@ -151,9 +130,11 @@ class UtoniaTracker:
         return mask
 
     def update_state(
-        self, coord: torch.Tensor, feat: torch.Tensor, mask: torch.Tensor
+        self,
+        coord: torch.Tensor,
+        feat: torch.Tensor,
+        mask: torch.Tensor,
     ) -> None:
-        """Update centroid, velocity, and prototype from the selected target points."""
         old_centroid = self.state.centroid.clone()
         old_prototype = self.state.prototype.clone()
         weight = (feat[mask] @ old_prototype).clamp_min(0) + 1e-6
@@ -169,7 +150,6 @@ class UtoniaTracker:
         )
 
     def step(self, coord: np.ndarray) -> dict[str, np.ndarray | int]:
-        """Track the target in one new frame and return values useful for visualization."""
         coord_t, feat = self.encode_frame(coord)
         sim = feat @ self.state.prototype
         score = self.score_points(coord_t, feat)
@@ -185,9 +165,10 @@ class UtoniaTracker:
         }
 
     def track_sequence(
-        self, frames: list[np.ndarray], query_xyz: np.ndarray | list[float]
+        self,
+        frames: list[np.ndarray],
+        query_xyz: np.ndarray | list[float],
     ) -> list[dict[str, np.ndarray | int]]:
-        """Run tracking over a list of frames and return per-frame outputs."""
         states = [self.initialize(frames[0], query_xyz)]
         for frame in frames[1:]:
             states.append(self.step(frame))

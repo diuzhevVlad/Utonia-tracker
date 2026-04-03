@@ -14,8 +14,20 @@
 
 
 from .model import load
-from .tracker import UtoniaTracker
+from .adapters.kitti_tracking import KittiGtDetectionSource
+from .tracking import (
+    Box3D,
+    Detection3D,
+    DetectionSource,
+    FrameDetections,
+    MOTracker,
+    Track3D,
+    UtoniaFrameEncoder,
+    UtoniaMOTracker,
+    UtoniaTracker,
+)
 
+from . import adapters
 from . import model
 from . import module
 from . import structure
@@ -23,16 +35,26 @@ from . import data
 from . import transform
 from . import utils
 from . import registry
-from . import tracker
+from . import tracking
 
 __all__ = [
     "load",
+    "Box3D",
+    "Detection3D",
+    "DetectionSource",
+    "FrameDetections",
+    "KittiGtDetectionSource",
+    "MOTracker",
+    "Track3D",
+    "UtoniaFrameEncoder",
+    "UtoniaMOTracker",
     "UtoniaTracker",
+    "adapters",
     "model",
     "module",
     "structure",
     "transform",
     "registry",
+    "tracking",
     "utils",
-    "tracker",
 ]
