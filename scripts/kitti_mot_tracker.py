@@ -12,6 +12,7 @@ from utonia.tracking.adapters import (
     KittiGtDetectionSource,
     KittiPrecomputedDetectionSource,
 )
+from utonia.tracking.config import AssociationConfig, FeatureCropConfig, MotionModelConfig
 from utonia.tracking.mot import MOTracker, UtoniaMOTracker
 from utonia.tracking.visualization import detection_boxes, load_xyz, track_boxes
 
@@ -21,6 +22,10 @@ def format_profile(profile: dict[str, float | int]) -> str:
     for key, value in profile.items():
         if key.endswith("_s"):
             parts.append(f"{key}={value * 1000.0:.1f}ms")
+        elif key in {"input_points", "roi_points", "roi_boxes"}:
+            parts.append(f"{key}={int(value)}")
+        elif key in {"roi_skip_appearance", "appearance_skipped"}:
+            parts.append(f"{key}={bool(value)}")
     return ", ".join(parts)
 
 
@@ -35,7 +40,9 @@ def print_profile_summary(summary: dict[str, float]) -> None:
             continue
         if key.endswith("_s"):
             stage_parts.append(f"{key}={value * 1000.0:.1f}ms")
-        elif key.startswith("num_"):
+        elif key.startswith("num_") or key in {"input_points", "roi_points", "roi_boxes"}:
+            count_parts.append(f"{key}={value:.2f}")
+        elif key in {"roi_skip_appearance", "appearance_skipped"}:
             count_parts.append(f"{key}={value:.2f}")
     print(f"profile summary over {frames} frames")
     if stage_parts:
@@ -64,6 +71,35 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-match-distance", type=float, default=5.0)
     parser.add_argument("--max-missed", type=int, default=2)
+    parser.add_argument("--motion-weight", type=float, default=1.0)
+    parser.add_argument("--bev-iou-weight", type=float, default=1.0)
+    parser.add_argument("--appearance-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--motion-model",
+        choices=["kalman", "velocity"],
+        default="kalman",
+        help="Motion model used for track prediction",
+    )
+    parser.add_argument("--process-var", type=float, default=1.0)
+    parser.add_argument("--measurement-var", type=float, default=1.0)
+    parser.add_argument(
+        "--disable-class-thresholds",
+        action="store_true",
+        help="Use flat thresholds for all classes",
+    )
+    parser.add_argument(
+        "--disable-bev-iou",
+        action="store_true",
+        help="Disable BEV IoU in association cost",
+    )
+    parser.add_argument(
+        "--feature-crop-mode",
+        choices=["full", "detections", "detections_and_tracks"],
+        default="detections_and_tracks",
+        help="Point-cloud region used for Utonia feature extraction",
+    )
+    parser.add_argument("--feature-crop-margin", type=float, default=2.0)
+    parser.add_argument("--feature-crop-min-points", type=int, default=2048)
     parser.add_argument(
         "--profile",
         action="store_true",
@@ -90,16 +126,43 @@ def main() -> None:
         source = KittiGtDetectionSource(args.sequence_dir)
     basic_tracker = None
     utonia_tracker = None
+    association_config = AssociationConfig(
+        max_match_distance=args.max_match_distance,
+        max_missed=args.max_missed,
+        motion_weight=args.motion_weight,
+        bev_iou_weight=args.bev_iou_weight if not args.disable_bev_iou else 0.0,
+        appearance_weight=0.0,
+    )
+    motion_config = MotionModelConfig(
+        kind=args.motion_model,
+        process_var=args.process_var,
+        measurement_var=args.measurement_var,
+    )
     if args.basic:
         basic_tracker = MOTracker(
             max_match_distance=args.max_match_distance,
             max_missed=args.max_missed,
+            use_class_thresholds=not args.disable_class_thresholds,
+            enable_bev_iou=not args.disable_bev_iou,
+            motion_model=motion_config,
+            association_config=association_config,
         )
         tracker_name = "basic"
     else:
         utonia_tracker = UtoniaMOTracker(
             max_match_distance=args.max_match_distance,
             max_missed=args.max_missed,
+            motion_weight=args.motion_weight,
+            bev_iou_weight=args.bev_iou_weight,
+            appearance_weight=args.appearance_weight,
+            use_class_thresholds=not args.disable_class_thresholds,
+            enable_bev_iou=not args.disable_bev_iou,
+            motion_model=motion_config,
+            feature_crop=FeatureCropConfig(
+                mode=args.feature_crop_mode,
+                crop_margin=args.feature_crop_margin,
+                min_points=args.feature_crop_min_points,
+            ),
         )
         tracker_name = "utonia"
 

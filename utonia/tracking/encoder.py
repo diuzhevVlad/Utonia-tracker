@@ -82,6 +82,36 @@ class UtoniaFrameEncoder:
         coord_t = torch.as_tensor(coord, dtype=torch.float32, device=self.device)
         return coord_t, feat
 
+    def select_roi_coord(
+        self,
+        coord: np.ndarray,
+        boxes: list[Box3D],
+        mode: str = "detections_and_tracks",
+        crop_margin: float = 2.0,
+        min_points: int = 2048,
+    ) -> tuple[np.ndarray | None, dict[str, int | bool]]:
+        stats: dict[str, int | bool] = {
+            "input_points": int(coord.shape[0]),
+            "roi_boxes": int(len(boxes)),
+            "roi_points": int(coord.shape[0]),
+            "roi_skip_appearance": False,
+        }
+        if mode == "full" or not boxes:
+            return coord, stats
+
+        mask = np.zeros(coord.shape[0], dtype=bool)
+        for box in boxes:
+            half_size = box.size * (0.5 * crop_margin)
+            local = np.abs(coord - box.center[None, :])
+            mask |= np.all(local <= half_size[None, :], axis=1)
+
+        roi_points = int(mask.sum())
+        stats["roi_points"] = roi_points
+        if roi_points < min_points:
+            stats["roi_skip_appearance"] = True
+            return None, stats
+        return coord[mask].copy(), stats
+
     def box_feature(
         self,
         coord_t: torch.Tensor,
