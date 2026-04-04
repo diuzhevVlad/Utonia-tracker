@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
@@ -14,6 +16,7 @@ def _new_track(next_track_id: int, detection: Detection3D) -> Track3D:
         label=detection.label,
         score=detection.score,
         prototype=detection.feature,
+        metadata=dict(detection.metadata),
     )
 
 
@@ -31,6 +34,7 @@ def _update_track(track: Track3D, detection: Detection3D, proto_momentum: float 
     track.velocity = detection.box.center - track.box.center
     track.box = detection.box
     track.score = detection.score
+    track.metadata = dict(detection.metadata)
     if detection.feature is not None:
         if track.prototype is None or proto_momentum >= 1.0:
             track.prototype = detection.feature
@@ -55,36 +59,83 @@ class MOTracker:
         self.max_missed = max_missed
         self._next_track_id = 1
         self._tracks: list[Track3D] = []
+        self.last_profile: dict[str, float | int] = {}
+        self._profile_totals: dict[str, float] = {}
+        self._profile_frames = 0
 
     def reset(self) -> None:
         self._next_track_id = 1
         self._tracks = []
+        self.last_profile = {}
+        self._profile_totals = {}
+        self._profile_frames = 0
 
     def update(self, frame: FrameDetections) -> list[Track3D]:
+        start_total = time.perf_counter()
         detections = frame.detections
+        profile: dict[str, float | int] = {
+            "num_detections": len(detections),
+            "num_tracks_before": len(self._tracks),
+        }
         if not self._tracks:
+            start_spawn = time.perf_counter()
             self._tracks = [self._spawn_track(detection) for detection in detections]
+            profile["spawn_s"] = time.perf_counter() - start_spawn
+            profile["num_tracks_after"] = len(self._tracks)
+            profile["total_s"] = time.perf_counter() - start_total
+            self._commit_profile(profile)
             return self.tracks()
 
+        start_match = time.perf_counter()
         matches, unmatched_track_ids, unmatched_detection_ids = self._match_detections(
             detections
         )
+        profile["matching_s"] = time.perf_counter() - start_match
+        profile["num_matches"] = len(matches)
+        profile["num_unmatched_tracks"] = len(unmatched_track_ids)
+        profile["num_unmatched_detections"] = len(unmatched_detection_ids)
 
+        start_update = time.perf_counter()
         for track_id, detection_id in matches:
             _update_track(self._tracks[track_id], detections[detection_id])
+        profile["matched_update_s"] = time.perf_counter() - start_update
 
+        start_age = time.perf_counter()
         for track_id in unmatched_track_ids:
             _age_track(self._tracks[track_id])
+        profile["age_s"] = time.perf_counter() - start_age
 
+        start_filter = time.perf_counter()
         self._tracks = [track for track in self._tracks if track.missed <= self.max_missed]
+        profile["filter_s"] = time.perf_counter() - start_filter
 
+        start_spawn = time.perf_counter()
         for detection_id in unmatched_detection_ids:
             self._tracks.append(self._spawn_track(detections[detection_id]))
+        profile["spawn_s"] = time.perf_counter() - start_spawn
 
+        profile["num_tracks_after"] = len(self._tracks)
+        profile["total_s"] = time.perf_counter() - start_total
+        self._commit_profile(profile)
         return self.tracks()
 
     def tracks(self) -> list[Track3D]:
         return list(self._tracks)
+
+    def profile_summary(self) -> dict[str, float]:
+        if self._profile_frames == 0:
+            return {}
+        summary = {"frames": float(self._profile_frames)}
+        for key, value in self._profile_totals.items():
+            summary[key] = value / self._profile_frames
+        return summary
+
+    def _commit_profile(self, profile: dict[str, float | int]) -> None:
+        self.last_profile = profile
+        self._profile_frames += 1
+        for key, value in profile.items():
+            if isinstance(value, (int, float)):
+                self._profile_totals[key] = self._profile_totals.get(key, 0.0) + float(value)
 
     def _spawn_track(self, detection: Detection3D) -> Track3D:
         track = _new_track(self._next_track_id, detection)
@@ -193,31 +244,61 @@ class UtoniaMOTracker(MOTracker):
         return self.encoder.encode_frame(coord)
 
     def update(self, coord: np.ndarray, frame: FrameDetections) -> list[Track3D]:
+        start_total = time.perf_counter()
+        profile: dict[str, float | int] = {
+            "num_detections": len(frame.detections),
+            "num_tracks_before": len(self._tracks),
+        }
+        start_encode = time.perf_counter()
         coord_t, feat_t = self.encode_frame(coord)
+        profile["encode_frame_s"] = time.perf_counter() - start_encode
+        start_feature = time.perf_counter()
         detections = self._attach_detection_features(frame.detections, coord_t, feat_t)
+        profile["box_features_s"] = time.perf_counter() - start_feature
         if not self._tracks:
+            start_spawn = time.perf_counter()
             self._tracks = [self._spawn_track(detection) for detection in detections]
+            profile["spawn_s"] = time.perf_counter() - start_spawn
+            profile["num_tracks_after"] = len(self._tracks)
+            profile["total_s"] = time.perf_counter() - start_total
+            self._commit_profile(profile)
             return self.tracks()
 
+        start_match = time.perf_counter()
         matches, unmatched_track_ids, unmatched_detection_ids = self._match_detections(
             detections
         )
+        profile["matching_s"] = time.perf_counter() - start_match
+        profile["num_matches"] = len(matches)
+        profile["num_unmatched_tracks"] = len(unmatched_track_ids)
+        profile["num_unmatched_detections"] = len(unmatched_detection_ids)
 
+        start_update = time.perf_counter()
         for track_id, detection_id in matches:
             _update_track(
                 self._tracks[track_id],
                 detections[detection_id],
                 proto_momentum=self.proto_momentum,
             )
+        profile["matched_update_s"] = time.perf_counter() - start_update
 
+        start_age = time.perf_counter()
         for track_id in unmatched_track_ids:
             _age_track(self._tracks[track_id])
+        profile["age_s"] = time.perf_counter() - start_age
 
+        start_filter = time.perf_counter()
         self._tracks = [track for track in self._tracks if track.missed <= self.max_missed]
+        profile["filter_s"] = time.perf_counter() - start_filter
 
+        start_spawn = time.perf_counter()
         for detection_id in unmatched_detection_ids:
             self._tracks.append(self._spawn_track(detections[detection_id]))
+        profile["spawn_s"] = time.perf_counter() - start_spawn
 
+        profile["num_tracks_after"] = len(self._tracks)
+        profile["total_s"] = time.perf_counter() - start_total
+        self._commit_profile(profile)
         return self.tracks()
 
     def _attach_detection_features(

@@ -10,12 +10,13 @@
 - No Copilot instructions were found in `.github/copilot-instructions.md`.
 ## Project Layout
 - `utonia/`: main package code.
-- `utonia/tracker.py`: best reference for newer style in this repo.
+- `utonia/tracking/`: tracking code, KITTI tracking adapters, detector integration, and visualization helpers.
 - `utonia/model.py`: large core model implementation with older conventions.
 - `utonia/transform.py`: large transform registry and preprocessing pipeline.
 - `scripts/`: practical smoke/integration entry points.
 - `demo/`: interactive demos from the README.
 - `data/`: local sample assets; `.gitignore` ignores `data/`, so do not assume datasets are committed.
+- `docs/REPRODUCTION_SETUP.md`: exact experiment environment, third-party revisions, local patches, detector setup, and evaluation commands.
 - `environment.yml`: recommended conda environment.
 - `setup.py`: package install entry point.
 ## Environment And Build
@@ -54,7 +55,7 @@ python -m compileall utonia scripts demo
 - In practice, tests are smoke tests through `scripts/` and selected `demo/` entry points.
 - Fast import smoke test:
 ```bash
-python -c "import utonia, utonia.model, utonia.transform, utonia.tracker"
+python -c "import utonia, utonia.model, utonia.transform, utonia.tracking"
 ```
 - Whole-repo syntax smoke test:
 ```bash
@@ -83,7 +84,7 @@ python scripts/kitti_tracker_test.py /path/to/trackkitti/training/velodyne/0000
 - Use `python scripts/pca_test.py data/000300.bin` for the fastest real feature-extraction smoke test.
 - Use `python scripts/pca_test.py /path/to/sequence --frame 300` when you need one exact frame.
 - Use `python scripts/similarity_test.py ...` for similarity or feature-normalization changes.
-- Use `python scripts/kitti_tracker_test.py ...` for `utonia/tracker.py` changes.
+- Use `python scripts/kitti_single_tracker.py ...` or `python scripts/kitti_mot_tracker.py ...` for tracking changes.
 - If the change only affects imports, packaging, or syntax, use `python -m compileall utonia scripts demo`.
 ## Runtime Notes
 - Many code paths assume CUDA is available, though several scripts fall back to CPU.
@@ -95,7 +96,7 @@ python scripts/kitti_tracker_test.py /path/to/trackkitti/training/velodyne/0000
 - GUI-heavy demos are not suitable for headless validation.
 ## Code Style Overview
 - Follow the surrounding file before applying any global preference.
-- Prefer the cleaner style in `utonia/tracker.py` when adding new modules or small helpers.
+- Prefer the cleaner style in `utonia/tracking/` when adding new tracking modules or small helpers.
 - Keep changes minimal, local, and task-focused.
 - Avoid opportunistic refactors in `model.py` or `transform.py` unless required for correctness.
 - Preserve existing copyright/license headers in files that already have them.
@@ -145,7 +146,7 @@ python scripts/kitti_tracker_test.py /path/to/trackkitti/training/velodyne/0000
 - Keep docstrings factual; avoid tutorial-style prose inside library code.
 ## File-Specific Guidance
 - `utonia/`: keep code import-safe and reusable.
-- `utonia/tracker.py`: preferred style reference for new tracking work.
+- `utonia/tracking/`: preferred style reference for new tracking work.
 - `utonia/model.py` and `utonia/transform.py`: large legacy-heavy files; match local conventions when editing them.
 - `scripts/`: favor clear CLI arguments, explicit file validation, and narrow smoke-test behavior.
 - `demo/`: example-oriented code; preserve the existing flow unless the task is demo-specific.

@@ -1,3 +1,10 @@
+from .adapters import (
+    KITTI_TRACKING_CLASSES,
+    KittiCalibration,
+    KittiGtDetectionSource,
+    KittiPrecomputedDetectionSource,
+    NpzDetectionSource,
+)
 from .encoder import UtoniaFrameEncoder
 from .mot import MOTracker, UtoniaMOTracker
 from .single import TrackerState, UtoniaTracker
@@ -8,7 +15,12 @@ __all__ = [
     "Detection3D",
     "DetectionSource",
     "FrameDetections",
+    "KITTI_TRACKING_CLASSES",
+    "KittiCalibration",
+    "KittiGtDetectionSource",
+    "KittiPrecomputedDetectionSource",
     "MOTracker",
+    "NpzDetectionSource",
     "Track3D",
     "TrackerState",
     "UtoniaFrameEncoder",

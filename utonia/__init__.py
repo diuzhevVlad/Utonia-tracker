@@ -14,20 +14,23 @@
 
 
 from .model import load
-from .adapters.kitti_tracking import KittiGtDetectionSource
 from .tracking import (
     Box3D,
     Detection3D,
     DetectionSource,
     FrameDetections,
+    KITTI_TRACKING_CLASSES,
+    KittiCalibration,
+    KittiGtDetectionSource,
+    KittiPrecomputedDetectionSource,
     MOTracker,
+    NpzDetectionSource,
     Track3D,
     UtoniaFrameEncoder,
     UtoniaMOTracker,
     UtoniaTracker,
 )
 
-from . import adapters
 from . import model
 from . import module
 from . import structure
@@ -43,13 +46,16 @@ __all__ = [
     "Detection3D",
     "DetectionSource",
     "FrameDetections",
+    "KITTI_TRACKING_CLASSES",
+    "KittiCalibration",
     "KittiGtDetectionSource",
+    "KittiPrecomputedDetectionSource",
     "MOTracker",
+    "NpzDetectionSource",
     "Track3D",
     "UtoniaFrameEncoder",
     "UtoniaMOTracker",
     "UtoniaTracker",
-    "adapters",
     "model",
     "module",
     "structure",

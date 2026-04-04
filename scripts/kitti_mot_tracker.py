@@ -2,86 +2,46 @@ import argparse
 from pathlib import Path
 import sys
 
-import numpy as np
 import rerun as rr
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utonia.adapters.kitti_tracking import KittiGtDetectionSource
+from utonia.tracking.adapters import (
+    KittiGtDetectionSource,
+    KittiPrecomputedDetectionSource,
+)
 from utonia.tracking.mot import MOTracker, UtoniaMOTracker
+from utonia.tracking.visualization import detection_boxes, load_xyz, track_boxes
 
 
-CLASS_COLORS = {
-    "Car": np.array([0, 255, 0], dtype=np.uint8),
-    "Pedestrian": np.array([255, 255, 0], dtype=np.uint8),
-    "Cyclist": np.array([0, 255, 255], dtype=np.uint8),
-    "Van": np.array([255, 128, 0], dtype=np.uint8),
-}
+def format_profile(profile: dict[str, float | int]) -> str:
+    parts = []
+    for key, value in profile.items():
+        if key.endswith("_s"):
+            parts.append(f"{key}={value * 1000.0:.1f}ms")
+    return ", ".join(parts)
 
 
-def load_xyz(path: Path) -> np.ndarray:
-    return np.fromfile(path, dtype=np.float32).reshape(-1, 4)[:, :3].copy()
-
-
-def boxes3d(boxes, labels, colors):
-    if not boxes:
-        return None
-
-    return rr.Boxes3D(
-        centers=np.stack([box.center for box in boxes], axis=0),
-        sizes=np.stack([box.size for box in boxes], axis=0),
-        rotations=[
-            rr.RotationAxisAngle(axis=[0.0, 0.0, 1.0], radians=box.yaw)
-            for box in boxes
-        ],
-        colors=colors,
-        labels=labels,
-        show_labels=True,
-    )
-
-
-def detection_boxes(frame):
-    detections = frame.detections
-    return boxes3d(
-        boxes=[detection.box for detection in detections],
-        labels=[
-            f"{detection.label}:GT{detection.metadata.get('track_id', '?')}"
-            for detection in detections
-        ],
-        colors=np.stack(
-            [
-                CLASS_COLORS.get(
-                    detection.label,
-                    np.array([255, 255, 255], dtype=np.uint8),
-                )
-                for detection in detections
-            ],
-            axis=0,
-        )
-        if detections
-        else np.zeros((0, 3), dtype=np.uint8),
-    )
-
-
-def track_boxes(tracks):
-    return boxes3d(
-        boxes=[track.box for track in tracks],
-        labels=[
-            f"T{track.track_id} {track.label} h={track.hits} m={track.missed}"
-            for track in tracks
-        ],
-        colors=np.stack(
-            [
-                CLASS_COLORS.get(track.label, np.array([255, 0, 255], dtype=np.uint8))
-                for track in tracks
-            ],
-            axis=0,
-        )
-        if tracks
-        else np.zeros((0, 3), dtype=np.uint8),
-    )
+def print_profile_summary(summary: dict[str, float]) -> None:
+    if not summary:
+        return
+    frames = int(summary.get("frames", 0.0))
+    stage_parts = []
+    count_parts = []
+    for key, value in summary.items():
+        if key == "frames":
+            continue
+        if key.endswith("_s"):
+            stage_parts.append(f"{key}={value * 1000.0:.1f}ms")
+        elif key.startswith("num_"):
+            count_parts.append(f"{key}={value:.2f}")
+    print(f"profile summary over {frames} frames")
+    if stage_parts:
+        print("  timings: " + ", ".join(stage_parts))
+    if count_parts:
+        print("  counts: " + ", ".join(count_parts))
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,8 +52,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int)
+    parser.add_argument(
+        "--detections-root",
+        help="Optional root of precomputed detections, e.g. data/detections/openpcdet_pointpillar",
+    )
+    parser.add_argument(
+        "--score-thresh",
+        type=float,
+        default=0.5,
+        help="Minimum detection score when using precomputed detections",
+    )
     parser.add_argument("--max-match-distance", type=float, default=5.0)
     parser.add_argument("--max-missed", type=int, default=2)
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print per-frame and average runtime breakdown",
+    )
     parser.add_argument(
         "--basic",
         action="store_true",
@@ -105,7 +80,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    source = KittiGtDetectionSource(args.sequence_dir)
+    if args.detections_root is not None:
+        source = KittiPrecomputedDetectionSource(
+            args.sequence_dir,
+            args.detections_root,
+            score_threshold=args.score_thresh,
+        )
+    else:
+        source = KittiGtDetectionSource(args.sequence_dir)
     basic_tracker = None
     utonia_tracker = None
     if args.basic:
@@ -140,17 +122,26 @@ def main() -> None:
         print(
             f"frame {frame_id}: {len(frame.detections)} detections, {len(tracks)} active tracks ({tracker_name})"
         )
+        if args.profile:
+            tracker_obj = basic_tracker if args.basic else utonia_tracker
+            assert tracker_obj is not None
+            print("  profile: " + format_profile(tracker_obj.last_profile))
 
         rr.set_time("frame", sequence=frame_id)
         rr.log("points", rr.Points3D(coord))
 
-        gt_boxes = detection_boxes(frame)
-        if gt_boxes is not None:
-            rr.log("gt/boxes", gt_boxes)
+        det_boxes = detection_boxes(frame)
+        if det_boxes is not None:
+            rr.log("detections/boxes", det_boxes)
 
         active_boxes = track_boxes(tracks)
         if active_boxes is not None:
             rr.log("tracks/boxes", active_boxes)
+
+    if args.profile:
+        tracker_obj = basic_tracker if args.basic else utonia_tracker
+        assert tracker_obj is not None
+        print_profile_summary(tracker_obj.profile_summary())
 
 
 if __name__ == "__main__":

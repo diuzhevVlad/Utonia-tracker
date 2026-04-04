@@ -16,7 +16,12 @@ This repo is the official project repository of the paper **_Utonia: Toward One 
 ## Overview
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Reproduction Setup](docs/REPRODUCTION_SETUP.md)
 - [Citation](#citation)
+
+## Reproduction Setup
+
+For the full tracking experiment environment, third-party dependencies, local patches, detector checkpoint setup, and evaluation commands, see [`docs/REPRODUCTION_SETUP.md`](docs/REPRODUCTION_SETUP.md).
 
 ## Installation
 This repo provide two ways of installation: **standalone mode** and **package mode**.

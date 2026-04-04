@@ -10,14 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utonia.adapters.kitti_tracking import KittiGtDetectionSource
+from utonia.tracking.adapters import KittiGtDetectionSource
+from utonia.tracking.visualization import load_xyz
 from utonia import UtoniaTracker
-
-
-def load_xyz(path: Path) -> np.ndarray:
-    return np.fromfile(path, dtype=np.float32).reshape(-1, 4)[:, :3].copy()
-
-
 def collect_gt_tracks(source: KittiGtDetectionSource):
     tracks = {}
     for frame_id in source.frame_ids():

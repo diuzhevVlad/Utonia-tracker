@@ -5,13 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ..tracking.types import (
-    Box3D,
-    Detection3D,
-    DetectionSource,
-    FrameDetections,
-    wrap_angle,
-)
+from .precomputed import NpzDetectionSource
+from ..types import Box3D, Detection3D, DetectionSource, FrameDetections, wrap_angle
 
 
 KITTI_TRACKING_CLASSES = ("Car", "Pedestrian", "Cyclist", "Van")
@@ -33,12 +28,15 @@ class _KittiTrackingLabel:
     rotation_y: float
 
 
-class _KittiCalibration:
+class KittiCalibration:
     def __init__(self, calib_path: str | Path) -> None:
         self.calib_path = Path(calib_path)
         if not self.calib_path.is_file():
             raise FileNotFoundError(f"KITTI calibration file not found: {self.calib_path}")
         values = self._parse_file(self.calib_path)
+        projection = values.get("P2")
+        if projection is None:
+            raise KeyError(f"Missing P2 in {self.calib_path}")
         rect = values.get("R_rect")
         if rect is None:
             rect = values.get("R0_rect")
@@ -56,6 +54,7 @@ class _KittiCalibration:
         tr_velo_4x4 = np.eye(4, dtype=np.float32)
         tr_velo_4x4[:3, :] = tr_velo.reshape(3, 4)
 
+        self.projection = projection.reshape(3, 4)
         self.rectified_cam_from_velodyne = rect_4x4 @ tr_velo_4x4
         self.velodyne_from_rectified_cam = np.linalg.inv(self.rectified_cam_from_velodyne)
 
@@ -91,6 +90,85 @@ class _KittiCalibration:
         points_velo = points_h @ self.velodyne_from_rectified_cam.T
         return points_velo[:, :3]
 
+    def velodyne_to_rect(self, points: np.ndarray) -> np.ndarray:
+        points = np.asarray(points, dtype=np.float32)
+        if points.ndim == 1:
+            points = points[None, :]
+        if points.shape[1] != 3:
+            raise ValueError(f"points must have shape (N, 3), got {points.shape}")
+        points_h = np.concatenate(
+            [points, np.ones((points.shape[0], 1), dtype=np.float32)],
+            axis=1,
+        )
+        points_rect = points_h @ self.rectified_cam_from_velodyne.T
+        return points_rect[:, :3]
+
+    def rect_to_image(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        points = np.asarray(points, dtype=np.float32)
+        if points.ndim == 1:
+            points = points[None, :]
+        if points.shape[1] != 3:
+            raise ValueError(f"points must have shape (N, 3), got {points.shape}")
+        points_h = np.concatenate(
+            [points, np.ones((points.shape[0], 1), dtype=np.float32)],
+            axis=1,
+        )
+        proj = points_h @ self.projection.T
+        depth = proj[:, 2]
+        image = proj[:, :2] / np.clip(depth[:, None], 1e-6, None)
+        return image, depth
+
+    def velodyne_to_image(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return self.rect_to_image(self.velodyne_to_rect(points))
+
+    def box_to_image_bbox(self, box: Box3D) -> np.ndarray | None:
+        corners = self._box_corners_lidar(box)
+        image, depth = self.velodyne_to_image(corners)
+        valid = depth > 0.1
+        if not np.any(valid):
+            return None
+        image = image[valid]
+        return np.array(
+            [
+                np.min(image[:, 0]),
+                np.min(image[:, 1]),
+                np.max(image[:, 0]),
+                np.max(image[:, 1]),
+            ],
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def _box_corners_lidar(box: Box3D) -> np.ndarray:
+        length, width, height = box.size
+        half_length = length / 2.0
+        half_width = width / 2.0
+        half_height = height / 2.0
+        corners = np.array(
+            [
+                [half_length, half_width, half_height],
+                [half_length, -half_width, half_height],
+                [-half_length, -half_width, half_height],
+                [-half_length, half_width, half_height],
+                [half_length, half_width, -half_height],
+                [half_length, -half_width, -half_height],
+                [-half_length, -half_width, -half_height],
+                [-half_length, half_width, -half_height],
+            ],
+            dtype=np.float32,
+        )
+        cos_yaw = np.cos(box.yaw)
+        sin_yaw = np.sin(box.yaw)
+        rotation = np.array(
+            [
+                [cos_yaw, -sin_yaw, 0.0],
+                [sin_yaw, cos_yaw, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        return corners @ rotation.T + box.center[None, :]
+
 
 class KittiGtDetectionSource(DetectionSource):
     """Load KITTI tracking ground-truth boxes as neutral 3D detections."""
@@ -114,7 +192,7 @@ class KittiGtDetectionSource(DetectionSource):
 
         self.label_path = Path(label_path)
         self.allowed_labels = None if allowed_labels is None else set(allowed_labels)
-        self.calibration = _KittiCalibration(calib_path)
+        self.calibration = KittiCalibration(calib_path)
         self._labels = self._parse_labels()
         self._frame_ids = self._discover_frame_ids()
         self._detections_by_frame = self._load_detections_by_frame()
@@ -211,3 +289,45 @@ class KittiGtDetectionSource(DetectionSource):
                 "rotation_y": label.rotation_y,
             },
         )
+
+
+class KittiPrecomputedDetectionSource(NpzDetectionSource):
+    """Read precomputed detector outputs for one KITTI tracking sequence."""
+
+    def __init__(
+        self,
+        sequence_dir: str | Path,
+        detections_root: str | Path,
+        calib_path: str | Path | None = None,
+        score_threshold: float = 0.0,
+    ) -> None:
+        self.sequence_dir = Path(sequence_dir)
+        if not self.sequence_dir.is_dir():
+            raise FileNotFoundError(f"KITTI sequence directory not found: {self.sequence_dir}")
+        self.sequence_id = self.sequence_dir.name
+        if calib_path is None:
+            calib_path = self.sequence_dir.parents[1] / "calib" / f"{self.sequence_id}.txt"
+        self.calibration = KittiCalibration(calib_path)
+        detections_dir = Path(detections_root) / self.sequence_id
+        frame_ids = sorted(int(path.stem) for path in self.sequence_dir.glob("*.bin"))
+        super().__init__(
+            detections_dir=detections_dir,
+            frame_ids=frame_ids,
+            score_threshold=score_threshold,
+            coordinate_frame="lidar",
+            source_name="kitti_precomputed",
+            metadata={"dataset": "KITTI", "sequence_id": self.sequence_id},
+        )
+
+    def enrich_detection(self, frame_id: int, detection: Detection3D) -> Detection3D:
+        detection.metadata.update(
+            {
+                "dataset": "KITTI",
+                "sequence_id": self.sequence_id,
+                "frame_id": frame_id,
+            }
+        )
+        bbox_2d = self.calibration.box_to_image_bbox(detection.box)
+        if bbox_2d is not None:
+            detection.metadata["bbox_2d"] = bbox_2d
+        return detection
