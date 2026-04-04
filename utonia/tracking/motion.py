@@ -10,27 +10,37 @@ from .types import Box3D, Track3D
 
 @dataclass
 class PredictedMotion:
+    """Predicted center and velocity for one track."""
+
     center: np.ndarray
     velocity: np.ndarray
 
 
 class VelocityMotionModel:
+    """Minimal constant-velocity predictor without uncertainty."""
+
     def initialize(self, track: Track3D) -> None:
         track.motion_state = None
 
     def predict(self, track: Track3D) -> PredictedMotion:
+        """Advance the track one step with its stored velocity."""
+
         return PredictedMotion(
             center=track.box.center + track.velocity,
             velocity=track.velocity.copy(),
         )
 
     def update(self, track: Track3D, measurement: np.ndarray) -> PredictedMotion:
+        """Replace velocity with the latest observed displacement."""
+
         velocity = measurement - track.box.center
         track.motion_state = None
         return PredictedMotion(center=measurement, velocity=velocity)
 
 
 class KalmanMotionModel:
+    """Small constant-velocity Kalman filter over 3D center + velocity."""
+
     def __init__(self, process_var: float = 1.0, measurement_var: float = 1.0) -> None:
         self.process_var = process_var
         self.measurement_var = measurement_var
@@ -40,6 +50,8 @@ class KalmanMotionModel:
         self._observation[:3, :3] = np.eye(3, dtype=np.float32)
 
     def initialize(self, track: Track3D) -> None:
+        """Create the initial Kalman state for a new track."""
+
         mean = np.concatenate([track.box.center, track.velocity]).astype(np.float32)
         covariance = np.eye(6, dtype=np.float32)
         covariance[:3, :3] *= 10.0
@@ -47,6 +59,8 @@ class KalmanMotionModel:
         track.motion_state = {"mean": mean, "covariance": covariance}
 
     def predict(self, track: Track3D) -> PredictedMotion:
+        """Run the Kalman predict step and return the predicted motion."""
+
         state = track.motion_state
         if state is None:
             self.initialize(track)
@@ -61,6 +75,8 @@ class KalmanMotionModel:
         return PredictedMotion(center=mean[:3].copy(), velocity=mean[3:].copy())
 
     def update(self, track: Track3D, measurement: np.ndarray) -> PredictedMotion:
+        """Run the Kalman update step with a new center measurement."""
+
         state = track.motion_state
         if state is None:
             self.initialize(track)
@@ -80,6 +96,8 @@ class KalmanMotionModel:
 
 
 def build_motion_model(config: MotionModelConfig):
+    """Construct the configured motion model."""
+
     if config.kind == "velocity":
         return VelocityMotionModel()
     if config.kind == "kalman":

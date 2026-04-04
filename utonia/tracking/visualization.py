@@ -22,6 +22,17 @@ def label_color(label: str) -> np.ndarray:
     return CLASS_COLORS.get(label, np.array([255, 255, 255], dtype=np.uint8))
 
 
+def track_color(track) -> np.ndarray:
+    if getattr(track, "state", "detected") == "recovered":
+        return np.array([255, 0, 255], dtype=np.uint8)
+    return label_color(track.label)
+
+
+def track_label(track) -> str:
+    suffix = " [R]" if getattr(track, "state", "detected") == "recovered" else ""
+    return f"T{track.track_id} {track.label}{suffix} h={track.hits} m={track.missed}"
+
+
 def boxes3d(boxes, labels, colors):
     if not boxes:
         return None
@@ -60,11 +71,8 @@ def detection_boxes(frame):
 def track_boxes(tracks):
     return boxes3d(
         boxes=[track.box for track in tracks],
-        labels=[
-            f"T{track.track_id} {track.label} h={track.hits} m={track.missed}"
-            for track in tracks
-        ],
-        colors=np.stack([label_color(track.label) for track in tracks], axis=0)
+        labels=[track_label(track) for track in tracks],
+        colors=np.stack([track_color(track) for track in tracks], axis=0)
         if tracks
         else np.zeros((0, 3), dtype=np.uint8),
     )

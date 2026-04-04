@@ -94,6 +94,7 @@ class Track3D:
     prototype: np.ndarray | None = None
     hits: int = 1
     missed: int = 0
+    state: str = "detected"
     motion_state: dict[str, np.ndarray] | None = None
     metadata: dict[str, object] = field(default_factory=dict)
 

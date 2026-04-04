@@ -10,6 +10,8 @@ from .types import Box3D
 
 
 def rotation_matrix_z(yaw: float) -> np.ndarray:
+    """Return a 3D rotation matrix around the z axis."""
+
     cos_yaw = np.cos(yaw)
     sin_yaw = np.sin(yaw)
     return np.array(
@@ -37,12 +39,16 @@ class UtoniaFrameEncoder:
         self.transform = None
 
     def _ensure_ready(self) -> None:
+        """Lazily build the model and transform on first use."""
+
         if self.model is None:
             self.build_model()
         if self.transform is None:
             self.build_transform()
 
     def build_model(self) -> None:
+        """Load the pretrained Utonia backbone."""
+
         self.model = load(
             "utonia",
             repo_id="Pointcept/Utonia",
@@ -51,9 +57,13 @@ class UtoniaFrameEncoder:
         self.model.eval()
 
     def build_transform(self) -> None:
+        """Build the default preprocessing transform used by tracking."""
+
         self.transform = transform.default(self.scale, apply_z_positive=False)
 
     def preprocess(self, coord: np.ndarray) -> dict[str, torch.Tensor]:
+        """Convert raw XYZ points into a Utonia input dict."""
+
         self._ensure_ready()
         point = {
             "coord": coord.copy(),
@@ -63,6 +73,8 @@ class UtoniaFrameEncoder:
         return self.transform(point)
 
     def encode_frame(self, coord: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode a point cloud and return original points with per-point features."""
+
         point = self.preprocess(coord)
         with torch.inference_mode():
             for key, value in point.items():
@@ -90,6 +102,8 @@ class UtoniaFrameEncoder:
         crop_margin: float = 2.0,
         min_points: int = 2048,
     ) -> tuple[np.ndarray | None, dict[str, int | bool]]:
+        """Return a local crop or `None` when appearance should be skipped."""
+
         stats: dict[str, int | bool] = {
             "input_points": int(coord.shape[0]),
             "roi_boxes": int(len(boxes)),
@@ -120,6 +134,8 @@ class UtoniaFrameEncoder:
         min_points: int = 64,
         box_margin: float = 1.1,
     ) -> np.ndarray:
+        """Pool a normalized appearance embedding for one box."""
+
         center = torch.as_tensor(box.center, dtype=torch.float32, device=self.device)
         rotation = torch.as_tensor(
             rotation_matrix_z(-box.yaw),
@@ -133,6 +149,7 @@ class UtoniaFrameEncoder:
             device=self.device,
         )
         mask = torch.all(torch.abs(local) <= half_size, dim=1)
+        # Very sparse boxes fall back to nearest points in the encoded crop.
         if int(mask.sum()) < min_points:
             dist = torch.linalg.norm(coord_t - center, dim=1)
             topk = torch.topk(

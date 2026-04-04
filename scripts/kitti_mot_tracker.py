@@ -12,7 +12,13 @@ from utonia.tracking.adapters import (
     KittiGtDetectionSource,
     KittiPrecomputedDetectionSource,
 )
-from utonia.tracking.config import AssociationConfig, FeatureCropConfig, MotionModelConfig
+from utonia.tracking.config import (
+    AssociationConfig,
+    FeatureCropConfig,
+    MotionModelConfig,
+    RecoveryConfig,
+    SpawnConfig,
+)
 from utonia.tracking.mot import MOTracker, UtoniaMOTracker
 from utonia.tracking.visualization import detection_boxes, load_xyz, track_boxes
 
@@ -22,7 +28,7 @@ def format_profile(profile: dict[str, float | int]) -> str:
     for key, value in profile.items():
         if key.endswith("_s"):
             parts.append(f"{key}={value * 1000.0:.1f}ms")
-        elif key in {"input_points", "roi_points", "roi_boxes"}:
+        elif key in {"input_points", "roi_points", "roi_boxes", "num_recovered_tracks", "num_suppressed_spawns"}:
             parts.append(f"{key}={int(value)}")
         elif key in {"roi_skip_appearance", "appearance_skipped"}:
             parts.append(f"{key}={bool(value)}")
@@ -70,7 +76,7 @@ def parse_args() -> argparse.Namespace:
         help="Minimum detection score when using precomputed detections",
     )
     parser.add_argument("--max-match-distance", type=float, default=5.0)
-    parser.add_argument("--max-missed", type=int, default=2)
+    parser.add_argument("--max-missed", type=int, default=4)
     parser.add_argument("--motion-weight", type=float, default=1.0)
     parser.add_argument("--bev-iou-weight", type=float, default=1.0)
     parser.add_argument("--appearance-weight", type=float, default=1.0)
@@ -100,6 +106,28 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--feature-crop-margin", type=float, default=2.0)
     parser.add_argument("--feature-crop-min-points", type=int, default=2048)
+    parser.add_argument(
+        "--disable-birth-suppression",
+        action="store_true",
+        help="Disable suppression of new tracks overlapping existing confirmed ones",
+    )
+    parser.add_argument("--spawn-same-class-iou", type=float, default=0.1)
+    parser.add_argument("--spawn-cross-class-iou", type=float, default=0.25)
+    parser.add_argument("--spawn-max-center-distance", type=float, default=2.0)
+    parser.add_argument("--spawn-max-track-missed", type=int, default=1)
+    parser.add_argument(
+        "--disable-recovery",
+        action="store_true",
+        help="Disable point-based recovery for unmatched confirmed tracks",
+    )
+    parser.add_argument("--recovery-max-missed", type=int, default=3)
+    parser.add_argument("--recovery-gate-radius", type=float, default=3.0)
+    parser.add_argument("--recovery-cluster-radius", type=float, default=1.2)
+    parser.add_argument("--recovery-sim-threshold", type=float, default=0.35)
+    parser.add_argument("--recovery-min-points", type=int, default=48)
+    parser.add_argument("--recovery-min-mean-similarity", type=float, default=0.45)
+    parser.add_argument("--recovery-max-center-distance", type=float, default=2.0)
+    parser.add_argument("--recovery-max-extent-scale", type=float, default=1.5)
     parser.add_argument(
         "--profile",
         action="store_true",
@@ -138,6 +166,24 @@ def main() -> None:
         process_var=args.process_var,
         measurement_var=args.measurement_var,
     )
+    recovery_config = RecoveryConfig(
+        enabled=not args.disable_recovery,
+        max_missed=args.recovery_max_missed,
+        gate_radius=args.recovery_gate_radius,
+        cluster_radius=args.recovery_cluster_radius,
+        sim_threshold=args.recovery_sim_threshold,
+        min_points=args.recovery_min_points,
+        min_mean_similarity=args.recovery_min_mean_similarity,
+        max_center_distance=args.recovery_max_center_distance,
+        max_extent_scale=args.recovery_max_extent_scale,
+    )
+    spawn_config = SpawnConfig(
+        enabled=not args.disable_birth_suppression,
+        same_class_min_bev_iou=args.spawn_same_class_iou,
+        cross_class_min_bev_iou=args.spawn_cross_class_iou,
+        max_center_distance=args.spawn_max_center_distance,
+        max_track_missed=args.spawn_max_track_missed,
+    )
     if args.basic:
         basic_tracker = MOTracker(
             max_match_distance=args.max_match_distance,
@@ -146,6 +192,7 @@ def main() -> None:
             enable_bev_iou=not args.disable_bev_iou,
             motion_model=motion_config,
             association_config=association_config,
+            spawn=spawn_config,
         )
         tracker_name = "basic"
     else:
@@ -163,6 +210,8 @@ def main() -> None:
                 crop_margin=args.feature_crop_margin,
                 min_points=args.feature_crop_min_points,
             ),
+            recovery=recovery_config,
+            spawn=spawn_config,
         )
         tracker_name = "utonia"
 

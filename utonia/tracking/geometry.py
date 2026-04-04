@@ -6,6 +6,8 @@ from .types import Box3D
 
 
 def box_bev_corners(box: Box3D) -> np.ndarray:
+    """Return the 4 BEV corners of an oriented 3D box."""
+
     length, width = box.size[:2]
     half_length = length / 2.0
     half_width = width / 2.0
@@ -28,6 +30,8 @@ def box_bev_corners(box: Box3D) -> np.ndarray:
 
 
 def polygon_area(points: np.ndarray) -> float:
+    """Compute polygon area with the shoelace formula."""
+
     if len(points) < 3:
         return 0.0
     x = points[:, 0]
@@ -36,6 +40,8 @@ def polygon_area(points: np.ndarray) -> float:
 
 
 def _inside(point: np.ndarray, edge_start: np.ndarray, edge_end: np.ndarray) -> bool:
+    """Check whether a point lies inside the current clipping half-plane."""
+
     edge = edge_end - edge_start
     rel = point - edge_start
     return float(edge[0] * rel[1] - edge[1] * rel[0]) >= 0.0
@@ -47,6 +53,8 @@ def _segment_intersection(
     q1: np.ndarray,
     q2: np.ndarray,
 ) -> np.ndarray:
+    """Return the intersection of two 2D line segments."""
+
     r = p2 - p1
     s = q2 - q1
     denom = r[0] * s[1] - r[1] * s[0]
@@ -58,6 +66,8 @@ def _segment_intersection(
 
 
 def polygon_clip(subject: np.ndarray, clipper: np.ndarray) -> np.ndarray:
+    """Clip one convex polygon by another using Sutherland-Hodgman."""
+
     output = subject
     for index in range(len(clipper)):
         edge_start = clipper[index]
@@ -86,6 +96,8 @@ def polygon_clip(subject: np.ndarray, clipper: np.ndarray) -> np.ndarray:
 
 
 def bev_iou(box_a: Box3D, box_b: Box3D) -> float:
+    """Compute BEV IoU for two oriented boxes."""
+
     corners_a = box_bev_corners(box_a)
     corners_b = box_bev_corners(box_b)
     inter_poly = polygon_clip(corners_a, corners_b)

@@ -13,7 +13,13 @@ from utonia.tracking.adapters import (
     KittiGtDetectionSource,
     KittiPrecomputedDetectionSource,
 )
-from utonia.tracking.config import AssociationConfig, FeatureCropConfig, MotionModelConfig
+from utonia.tracking.config import (
+    AssociationConfig,
+    FeatureCropConfig,
+    MotionModelConfig,
+    RecoveryConfig,
+    SpawnConfig,
+)
 from utonia.tracking.mot import MOTracker, UtoniaMOTracker
 from utonia.tracking.visualization import load_xyz
 
@@ -79,6 +85,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-crop-margin", type=float, default=2.0)
     parser.add_argument("--feature-crop-min-points", type=int, default=2048)
     parser.add_argument(
+        "--disable-birth-suppression",
+        action="store_true",
+        help="Disable suppression of new tracks overlapping existing confirmed ones",
+    )
+    parser.add_argument("--spawn-same-class-iou", type=float, default=0.1)
+    parser.add_argument("--spawn-cross-class-iou", type=float, default=0.25)
+    parser.add_argument("--spawn-max-center-distance", type=float, default=2.0)
+    parser.add_argument("--spawn-max-track-missed", type=int, default=1)
+    parser.add_argument(
+        "--disable-recovery",
+        action="store_true",
+        help="Disable point-based recovery for unmatched confirmed tracks",
+    )
+    parser.add_argument("--recovery-max-missed", type=int, default=3)
+    parser.add_argument("--recovery-gate-radius", type=float, default=3.0)
+    parser.add_argument("--recovery-cluster-radius", type=float, default=1.2)
+    parser.add_argument("--recovery-sim-threshold", type=float, default=0.35)
+    parser.add_argument("--recovery-min-points", type=int, default=48)
+    parser.add_argument("--recovery-min-mean-similarity", type=float, default=0.45)
+    parser.add_argument("--recovery-max-center-distance", type=float, default=2.0)
+    parser.add_argument("--recovery-max-extent-scale", type=float, default=1.5)
+    parser.add_argument(
         "--tracker-name",
         help="Name for exported tracker results",
     )
@@ -129,6 +157,24 @@ def build_tracker(args) -> tuple[object, str]:
         process_var=args.process_var,
         measurement_var=args.measurement_var,
     )
+    recovery_config = RecoveryConfig(
+        enabled=not args.disable_recovery,
+        max_missed=args.recovery_max_missed,
+        gate_radius=args.recovery_gate_radius,
+        cluster_radius=args.recovery_cluster_radius,
+        sim_threshold=args.recovery_sim_threshold,
+        min_points=args.recovery_min_points,
+        min_mean_similarity=args.recovery_min_mean_similarity,
+        max_center_distance=args.recovery_max_center_distance,
+        max_extent_scale=args.recovery_max_extent_scale,
+    )
+    spawn_config = SpawnConfig(
+        enabled=not args.disable_birth_suppression,
+        same_class_min_bev_iou=args.spawn_same_class_iou,
+        cross_class_min_bev_iou=args.spawn_cross_class_iou,
+        max_center_distance=args.spawn_max_center_distance,
+        max_track_missed=args.spawn_max_track_missed,
+    )
     if args.basic:
         return (
             MOTracker(
@@ -138,6 +184,7 @@ def build_tracker(args) -> tuple[object, str]:
                 enable_bev_iou=not args.disable_bev_iou,
                 motion_model=motion_config,
                 association_config=association_config,
+                spawn=spawn_config,
             ),
             args.tracker_name or "utonia_basic",
         )
@@ -156,6 +203,8 @@ def build_tracker(args) -> tuple[object, str]:
                 crop_margin=args.feature_crop_margin,
                 min_points=args.feature_crop_min_points,
             ),
+            recovery=recovery_config,
+            spawn=spawn_config,
         ),
         args.tracker_name or "utonia_appearance",
     )
