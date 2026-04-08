@@ -369,6 +369,8 @@ class UtoniaMOTracker(MOTracker):
         motion_model: MotionModelConfig | None = None,
         recovery: RecoveryConfig | None = None,
         spawn: SpawnConfig | None = None,
+        appearance_second_pass: bool = True,
+        appearance_second_pass_distance_scale: float = 1.25,
         use_class_thresholds: bool = True,
         enable_bev_iou: bool = True,
         class_configs: dict[str, AssociationConfig] | None = None,
@@ -397,6 +399,8 @@ class UtoniaMOTracker(MOTracker):
         self.proto_momentum = proto_momentum
         self.feature_crop = feature_crop or FeatureCropConfig()
         self.recovery = recovery or RecoveryConfig()
+        self.appearance_second_pass = appearance_second_pass
+        self.appearance_second_pass_distance_scale = appearance_second_pass_distance_scale
 
     @property
     def model(self):
@@ -481,6 +485,11 @@ class UtoniaMOTracker(MOTracker):
             predicted_boxes,
         )
         profile["matching_s"] = time.perf_counter() - start_match
+        profile["num_second_pass_matches"] = sum(
+            1
+            for _, detection_id in matches
+            if detections[detection_id].metadata.get("match_pass") == "appearance"
+        )
         profile["num_matches"] = len(matches)
         profile["num_unmatched_tracks"] = len(unmatched_track_ids)
         profile["num_unmatched_detections"] = len(unmatched_detection_ids)
@@ -706,9 +715,68 @@ class UtoniaMOTracker(MOTracker):
         detections: list[Detection3D],
         predicted_boxes: list[Box3D],
     ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
-        """Reuse the base matcher; only the cost function changes."""
+        """Match with geometry first, then use appearance on the leftovers."""
 
-        return super()._match_detections(detections, predicted_boxes)
+        matches, unmatched_track_ids, unmatched_detection_ids = super()._match_detections(
+            detections,
+            predicted_boxes,
+        )
+        for _, detection_id in matches:
+            detections[detection_id].metadata["match_pass"] = "geometry"
+
+        if (
+            not self.appearance_second_pass
+            or self.default_config.appearance_weight <= 0.0
+            or not unmatched_track_ids
+            or not unmatched_detection_ids
+        ):
+            return matches, unmatched_track_ids, unmatched_detection_ids
+
+        candidate_track_ids = [
+            track_id
+            for track_id in unmatched_track_ids
+            if self._tracks[track_id].is_confirmed and self._tracks[track_id].prototype is not None
+        ]
+        if not candidate_track_ids:
+            return matches, unmatched_track_ids, unmatched_detection_ids
+
+        sub_cost = np.full(
+            (len(candidate_track_ids), len(unmatched_detection_ids)),
+            fill_value=1e6,
+            dtype=np.float32,
+        )
+        for row, track_id in enumerate(candidate_track_ids):
+            track = self._tracks[track_id]
+            predicted_box = predicted_boxes[track_id]
+            for col, detection_id in enumerate(unmatched_detection_ids):
+                cost = self._appearance_second_pass_cost(
+                    track,
+                    predicted_box,
+                    detections[detection_id],
+                )
+                if cost is not None:
+                    sub_cost[row, col] = cost
+
+        sub_matches, _, _ = self._solve_assignment(sub_cost, 1e6, len(unmatched_detection_ids))
+        matched_track_ids = set()
+        matched_detection_ids = set()
+        for row, col in sub_matches:
+            track_id = candidate_track_ids[row]
+            detection_id = unmatched_detection_ids[col]
+            detections[detection_id].metadata["match_pass"] = "appearance"
+            matches.append((track_id, detection_id))
+            matched_track_ids.add(track_id)
+            matched_detection_ids.add(detection_id)
+
+        unmatched_track_ids = [
+            track_id for track_id in unmatched_track_ids if track_id not in matched_track_ids
+        ]
+        unmatched_detection_ids = [
+            detection_id
+            for detection_id in unmatched_detection_ids
+            if detection_id not in matched_detection_ids
+        ]
+        return matches, unmatched_track_ids, unmatched_detection_ids
 
     def _association_cost(
         self,
@@ -731,3 +799,31 @@ class UtoniaMOTracker(MOTracker):
         similarity = float(track.prototype @ detection.feature)
         appearance_cost = 1.0 - max(similarity, -1.0)
         return float(base_cost + config.appearance_weight * appearance_cost)
+
+    def _appearance_second_pass_cost(
+        self,
+        track: Track3D,
+        predicted_box: Box3D,
+        detection: Detection3D,
+    ) -> float | None:
+        """Use appearance on unmatched leftovers with a slightly looser motion gate."""
+
+        if track.label != detection.label:
+            return None
+        if detection.feature is None or track.prototype is None:
+            return None
+        config = self._resolve_config(track.label)
+        relaxed_distance = config.max_match_distance * self.appearance_second_pass_distance_scale
+        distance = np.linalg.norm(predicted_box.center - detection.box.center)
+        if distance > relaxed_distance:
+            return None
+        iou = bev_iou(predicted_box, detection.box) if config.bev_iou_weight > 0.0 else 0.0
+        motion_cost = distance / max(relaxed_distance, 1e-6)
+        iou_cost = (1.0 - iou) if config.bev_iou_weight > 0.0 else 0.0
+        similarity = float(track.prototype @ detection.feature)
+        appearance_cost = 1.0 - max(similarity, -1.0)
+        return float(
+            config.motion_weight * motion_cost
+            + config.bev_iou_weight * iou_cost
+            + config.appearance_weight * appearance_cost
+        )

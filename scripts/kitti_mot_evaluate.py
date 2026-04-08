@@ -1,5 +1,6 @@
 import argparse
 import copy
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -220,7 +221,12 @@ def build_detection_source(args, sequence_dir: Path):
     return KittiGtDetectionSource(sequence_dir)
 
 
-def track_sequence(sequence_dir: Path, tracker, use_basic: bool, args) -> tuple[dict[int, list[object]], object]:
+def track_sequence(
+    sequence_dir: Path,
+    tracker,
+    use_basic: bool,
+    args,
+) -> tuple[dict[int, list[object]], object, dict[str, float]]:
     source = build_detection_source(args, sequence_dir)
     tracker.reset()
     results: dict[int, list[object]] = {}
@@ -232,7 +238,7 @@ def track_sequence(sequence_dir: Path, tracker, use_basic: bool, args) -> tuple[
             coord = load_xyz(sequence_dir / f"{frame_id:06d}.bin")
             tracks = tracker.update(coord, frame)
         results[frame_id] = copy.deepcopy(tracks)
-    return results, source
+    return results, source, tracker.profile_summary()
 
 
 def format_kitti_result_line(frame_id: int, track, calibration=None) -> str | None:
@@ -269,6 +275,30 @@ def export_sequence_results(
     out_path.write_text("\n".join(lines) + ("\n" if lines else ""))
 
 
+def save_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def aggregate_profile_summaries(
+    sequence_profiles: dict[str, dict[str, float]],
+    sequence_frames: dict[str, int],
+) -> dict[str, float]:
+    total_frames = sum(sequence_frames.values())
+    if total_frames == 0:
+        return {}
+    keys = set().union(*(profile.keys() for profile in sequence_profiles.values()))
+    summary: dict[str, float] = {"frames": float(total_frames)}
+    for key in keys:
+        if key == "frames":
+            continue
+        weighted = 0.0
+        for sequence_id, profile in sequence_profiles.items():
+            if key in profile:
+                weighted += profile[key] * sequence_frames[sequence_id]
+        summary[key] = weighted / total_frames
+    return summary
+
+
 def ensure_trackeval_available(trackeval_root: Path) -> None:
     runner = trackeval_root / "scripts" / "run_kitti.py"
     if not runner.is_file():
@@ -303,8 +333,10 @@ def ensure_gt_workspace(training_dir: Path, workspace_root: Path, sequence_ids: 
     lines = []
     for sequence_id in sequence_ids:
         sequence_dir = velodyne_root / sequence_id
-        frame_count = len(list(sequence_dir.glob("*.bin")))
-        lines.append(f"{sequence_id} empty 0 {frame_count}")
+        frame_ids = sorted(int(path.stem) for path in sequence_dir.glob("*.bin"))
+        if not frame_ids:
+            raise ValueError(f"No KITTI point cloud frames found in {sequence_dir}")
+        lines.append(f"{sequence_id} empty 0 {frame_ids[-1] + 1}")
     seqmap_path.write_text("\n".join(lines) + "\n")
     return gt_root
 
@@ -351,20 +383,38 @@ def main() -> None:
     output_root = Path(args.output_root).resolve()
     tracker_data_dir = output_root / "trackers" / "kitti" / "kitti_2d_box_train" / tracker_name / "data"
     tracker_data_dir.mkdir(parents=True, exist_ok=True)
+    tracker_root = tracker_data_dir.parent
+    tracker_root.mkdir(parents=True, exist_ok=True)
+
+    save_json(
+        tracker_root / "run_config.json",
+        {
+            "tracker_name": tracker_name,
+            "args": vars(args),
+            "sequence_ids": sequence_ids,
+        },
+    )
 
     velodyne_root = training_dir / "velodyne"
+    sequence_profiles: dict[str, dict[str, float]] = {}
+    sequence_frames: dict[str, int] = {}
     for sequence_id in sequence_ids:
         sequence_dir = velodyne_root / sequence_id
         if not sequence_dir.is_dir():
             raise FileNotFoundError(f"KITTI sequence directory not found: {sequence_dir}")
         print(f"tracking sequence {sequence_id} with tracker={tracker_name}")
-        tracks_by_frame, source = track_sequence(sequence_dir, tracker, args.basic, args)
+        tracks_by_frame, source, profile_summary = track_sequence(sequence_dir, tracker, args.basic, args)
         export_sequence_results(
             sequence_id,
             tracks_by_frame,
             tracker_data_dir,
             calibration=getattr(source, "calibration", None),
         )
+        sequence_profiles[sequence_id] = profile_summary
+        sequence_frames[sequence_id] = len(tracks_by_frame)
+
+    save_json(tracker_root / "profile_summary.json", aggregate_profile_summaries(sequence_profiles, sequence_frames))
+    save_json(tracker_root / "profile_by_sequence.json", sequence_profiles)
 
     print(f"exported KITTI results to {tracker_data_dir}")
 
