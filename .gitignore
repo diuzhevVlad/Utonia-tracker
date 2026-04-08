@@ -17,3 +17,5 @@ outputs/
 Dockerfile
 
 .codex
+third_party/
+thirdparty/
