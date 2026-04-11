@@ -29,6 +29,7 @@ class UtoniaTracker:
         gate_radius: float = 4.0,
         local_crop_radius: float = 8.0,
         local_crop_min_points: int = 2048,
+        detection_overlap_threshold: float = 0.3,
         sim_threshold: float = 0.6,
         init_points: int = 64,
         min_points: int = 64,
@@ -43,6 +44,7 @@ class UtoniaTracker:
         self.gate_radius = gate_radius
         self.local_crop_radius = local_crop_radius
         self.local_crop_min_points = local_crop_min_points
+        self.detection_overlap_threshold = detection_overlap_threshold
         self.sim_threshold = sim_threshold
         self.init_points = init_points
         self.min_points = min_points
@@ -233,30 +235,53 @@ class UtoniaTracker:
         return mask
 
     def update_state(
-        self, coord: torch.Tensor, feat: torch.Tensor, mask: torch.Tensor
+        self,
+        coord: torch.Tensor,
+        feat: torch.Tensor,
+        mask: torch.Tensor,
+        prototype_mask: torch.Tensor | None = None,
     ) -> None:
-        """Update centroid, velocity, and prototype from the selected target points."""
+        """Update centroid/velocity from the target mask and the prototype from a support mask."""
         old_centroid = self.state.centroid.clone()
         old_prototype = self.state.prototype.clone()
-        weight = (feat[mask] @ old_prototype).clamp_min(0) + 1e-6
+        support_mask = prototype_mask if prototype_mask is not None else mask
+        centroid_weight = (feat[mask] @ old_prototype).clamp_min(0) + 1e-6
+        support_weight = (feat[support_mask] @ old_prototype).clamp_min(0) + 1e-6
         self.state.centroid = (
-            torch.sum(coord[mask] * weight[:, None], dim=0) / weight.sum()
+            torch.sum(coord[mask] * centroid_weight[:, None], dim=0)
+            / centroid_weight.sum()
         )
         self.state.velocity = self.state.centroid - old_centroid
-        new_prototype = torch.sum(feat[mask] * weight[:, None], dim=0)
+        new_prototype = torch.sum(feat[support_mask] * support_weight[:, None], dim=0)
         self.state.prototype = F.normalize(
             self.proto_momentum * old_prototype
             + (1.0 - self.proto_momentum) * new_prototype,
             dim=0,
         )
 
-    def step(self, coord: np.ndarray) -> dict[str, np.ndarray | int]:
-        """Track the target in one new frame and return values useful for visualization."""
+    def step(
+        self,
+        coord: np.ndarray,
+        detection_box: np.ndarray | list[float] | None = None,
+    ) -> dict[str, np.ndarray | int | None]:
+        """Track one frame and optionally use a matched detection box to refresh the prototype."""
         coord_t, feat, crop_indices = self.encode_frame(coord, center=self.predict_position())
         sim = feat @ self.state.prototype
         score = self.score_points(coord_t, feat)
         mask = self.extract_target(coord_t, sim, score)
-        self.update_state(coord_t, feat, mask)
+        used_box = None
+        prototype_mask = mask
+        if detection_box is not None:
+            box_t = torch.as_tensor(detection_box, dtype=torch.float32, device=self.device)
+            detection_mask = self.box_mask(coord_t, box_t)
+            overlap = (mask & detection_mask).float().sum() / mask.float().sum().clamp_min(1.0)
+            if (
+                int(detection_mask.sum()) >= self.init_points
+                and float(overlap.detach().cpu()) >= self.detection_overlap_threshold
+            ):
+                prototype_mask = detection_mask
+                used_box = box_t.detach().cpu().numpy()
+        self.update_state(coord_t, feat, mask, prototype_mask=prototype_mask)
         anchor_index = int(torch.argmax(score).detach().cpu())
         return {
             "coord": coord_t.detach().cpu().numpy(),
@@ -265,6 +290,7 @@ class UtoniaTracker:
             "centroid": self.state.centroid.detach().cpu().numpy(),
             "anchor_index": anchor_index,
             "crop_indices": crop_indices,
+            "used_box": used_box,
         }
 
     def track_sequence(

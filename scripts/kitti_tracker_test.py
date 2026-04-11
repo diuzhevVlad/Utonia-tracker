@@ -137,9 +137,56 @@ def select_init_box(
     return boxes[best], f"{label_to_name(labels[best])} {scores[best]:.2f}"
 
 
+def match_update_box(
+    source: str,
+    frame_id: int,
+    gt_record,
+    calib: Calibration,
+    detections_root: Path,
+    score_thresh: float,
+    pred_centroid: np.ndarray,
+    match_radius: float,
+) -> tuple[np.ndarray | None, str | None]:
+    if source == "gt":
+        return record_to_lidar_box(gt_record, calib), canonical_label(gt_record["type"])
+
+    boxes, scores, labels = load_detection_boxes(
+        detections_root / f"{frame_id:06d}.npz",
+        score_thresh,
+    )
+    if len(boxes) == 0:
+        return None, None
+
+    gt_name = canonical_label(gt_record["type"])
+    keep = np.array([label_to_name(label) == gt_name for label in labels], dtype=bool)
+    if keep.any():
+        boxes = boxes[keep]
+        scores = scores[keep]
+        labels = labels[keep]
+    if len(boxes) == 0:
+        return None, None
+
+    distances = np.linalg.norm(boxes[:, :3] - pred_centroid[None], axis=1)
+    best = int(np.argmin(distances))
+    if distances[best] > match_radius:
+        return None, None
+    return boxes[best], f"{label_to_name(labels[best])} {scores[best]:.2f}"
+
+
 def box_quaternion(box: np.ndarray) -> np.ndarray:
     half = box[6] * 0.5
     return np.array([[0.0, 0.0, np.sin(half), np.cos(half)]], dtype=np.float32)
+
+
+def empty_boxes() -> rr.Boxes3D:
+    return rr.Boxes3D(
+        centers=np.zeros((0, 3), dtype=np.float32),
+        sizes=np.zeros((0, 3), dtype=np.float32),
+        quaternions=np.zeros((0, 4), dtype=np.float32),
+        colors=np.zeros((0, 3), dtype=np.uint8),
+        labels=[],
+        show_labels=True,
+    )
 
 
 def main():
@@ -151,7 +198,7 @@ def main():
     parser.add_argument(
         "--init-source",
         choices=["gt", "pointpillar", "pointrcnn"],
-        default="gt",
+        default="pointrcnn",
         help="Source of the initialization box on the first frame.",
     )
     parser.add_argument(
@@ -182,6 +229,12 @@ def main():
         type=int,
         default=2048,
         help="Minimum points kept in the local crop before falling back to nearest points.",
+    )
+    parser.add_argument(
+        "--detection-overlap-thresh",
+        type=float,
+        default=0.3,
+        help="Use a matched detection box only if it overlaps enough with the tracked points.",
     )
     parser.add_argument(
         "--max-frames",
@@ -218,6 +271,7 @@ def main():
         gate_radius=5.0,
         local_crop_radius=args.local_crop_radius,
         local_crop_min_points=args.local_crop_min_points,
+        detection_overlap_threshold=args.detection_overlap_thresh,
     )
     first_frame = frame_ids[0]
     first_coord = load_xyz(velodyne_dir / f"{first_frame:06d}.bin")
@@ -249,17 +303,7 @@ def main():
         "track/pred",
         rr.Points3D(init_state["centroid"][None], colors=np.array([[255, 0, 0]], dtype=np.uint8)),
     )
-    rr.log(
-        "track/init_box",
-        rr.Boxes3D(
-            centers=init_box[None, :3],
-            sizes=init_box[None, 3:6],
-            quaternions=box_quaternion(init_box),
-            colors=np.array([[255, 255, 0]], dtype=np.uint8),
-            labels=[f"init {args.init_source}: {init_label}"],
-            show_labels=True,
-        ),
-    )
+    rr.log("track/used_box", empty_boxes())
     rr.log(
         "track/gt_box",
         rr.Boxes3D(
@@ -274,7 +318,18 @@ def main():
 
     for frame_id in frame_ids[1:]:
         coord = load_xyz(velodyne_dir / f"{frame_id:06d}.bin")
-        state = tracker.step(coord)
+        pred_centroid = tracker.predict_position().detach().cpu().numpy()
+        matched_box, matched_label = match_update_box(
+            source=args.init_source,
+            frame_id=frame_id,
+            gt_record=gt[frame_id],
+            calib=calib,
+            detections_root=detections_root / seq,
+            score_thresh=args.score_thresh,
+            pred_centroid=pred_centroid,
+            match_radius=tracker.gate_radius,
+        )
+        state = tracker.step(coord, detection_box=matched_box)
         gt_box = record_to_lidar_box(gt[frame_id], calib)
         rr.set_time("frame", sequence=frame_id)
         rr.log("points", rr.Points3D(coord, colors=point_colors(coord, state)))
@@ -289,6 +344,20 @@ def main():
             "track/pred",
             rr.Points3D(state["centroid"][None], colors=np.array([[255, 0, 0]], dtype=np.uint8)),
         )
+        if state["used_box"] is None:
+            rr.log("track/used_box", empty_boxes())
+        else:
+            rr.log(
+                "track/used_box",
+                rr.Boxes3D(
+                    centers=state["used_box"][None, :3],
+                    sizes=state["used_box"][None, 3:6],
+                    quaternions=box_quaternion(state["used_box"]),
+                    colors=np.array([[255, 255, 0]], dtype=np.uint8),
+                    labels=[f"used {args.init_source}: {matched_label}"],
+                    show_labels=True,
+                ),
+            )
         rr.log(
             "track/gt_box",
             rr.Boxes3D(
