@@ -52,6 +52,38 @@ def choose_track_id(records):
                 return record["track_id"]
 
 
+def list_tracks_for_class(records, target_class: str) -> list[dict]:
+    frame0 = [r for r in records if r["frame"] == 0]
+    target_class = canonical_label(target_class)
+    return [record for record in frame0 if canonical_label(record["type"]) == target_class]
+
+
+def resolve_track_id(
+    records,
+    track_id: int | None,
+    target_class: str | None,
+) -> int:
+    if track_id is not None:
+        return track_id
+
+    if target_class is not None:
+        matches = list_tracks_for_class(records, target_class)
+        print(f"Tracks for class {canonical_label(target_class)} in frame 0:")
+        for record in matches:
+            print(
+                f"  track_id={record['track_id']} type={record['type']} "
+                f"xyz=({record['x']:.2f}, {record['y']:.2f}, {record['z']:.2f})"
+            )
+        if not matches:
+            raise RuntimeError(f"No frame-0 tracks found for class {target_class}")
+        return matches[0]["track_id"]
+
+    track_id = choose_track_id(records)
+    if track_id is None:
+        raise RuntimeError("No default frame-0 Car/Van track found")
+    return track_id
+
+
 def canonical_label(name: str) -> str:
     return "Car" if name == "Van" else name
 
@@ -141,6 +173,7 @@ def match_update_box(
     source: str,
     frame_id: int,
     gt_record,
+    target_class: str,
     calib: Calibration,
     detections_root: Path,
     score_thresh: float,
@@ -148,6 +181,8 @@ def match_update_box(
     match_radius: float,
 ) -> tuple[np.ndarray | None, str | None]:
     if source == "gt":
+        if gt_record is None:
+            return None, None
         return record_to_lidar_box(gt_record, calib), canonical_label(gt_record["type"])
 
     boxes, scores, labels = load_detection_boxes(
@@ -157,14 +192,12 @@ def match_update_box(
     if len(boxes) == 0:
         return None, None
 
-    gt_name = canonical_label(gt_record["type"])
-    keep = np.array([label_to_name(label) == gt_name for label in labels], dtype=bool)
-    if keep.any():
-        boxes = boxes[keep]
-        scores = scores[keep]
-        labels = labels[keep]
-    if len(boxes) == 0:
+    keep = np.array([label_to_name(label) == canonical_label(target_class) for label in labels], dtype=bool)
+    if not keep.any():
         return None, None
+    boxes = boxes[keep]
+    scores = scores[keep]
+    labels = labels[keep]
 
     distances = np.linalg.norm(boxes[:, :3] - pred_centroid[None], axis=1)
     best = int(np.argmin(distances))
@@ -202,6 +235,18 @@ def main():
         help="Source of the initialization box on the first frame.",
     )
     parser.add_argument(
+        "--track-id",
+        type=int,
+        default=None,
+        help="Track id to follow from the KITTI labels.",
+    )
+    parser.add_argument(
+        "--target-class",
+        choices=["Car", "Van", "Pedestrian", "Cyclist"],
+        default=None,
+        help="Choose the first frame-0 track of this class and print all matching frame-0 tracks.",
+    )
+    parser.add_argument(
         "--detections-root",
         default=None,
         help="Optional detection root ending at <model>/npz. Defaults to data/detections/<init-source>/npz.",
@@ -237,6 +282,12 @@ def main():
         help="Use a matched detection box only if it overlaps enough with the tracked points.",
     )
     parser.add_argument(
+        "--box-height-filter-ratio",
+        type=float,
+        default=0.15,
+        help="Ignore the bottom ratio of box-supported points when building track support masks.",
+    )
+    parser.add_argument(
         "--max-frames",
         type=int,
         default=None,
@@ -256,11 +307,16 @@ def main():
     calib = Calibration(calib_path)
 
     records = parse_labels(label_path)
-    track_id = choose_track_id(records)
+    track_id = resolve_track_id(records, track_id=args.track_id, target_class=args.target_class)
     gt = gt_by_frame(records, track_id)
-    frame_ids = sorted(gt.keys())
+    if not gt:
+        raise RuntimeError(f"Track id {track_id} not found in {label_path}")
+    annotated_frame_ids = sorted(gt.keys())
+    first_frame = annotated_frame_ids[0]
+    target_class = canonical_label(gt[first_frame]["type"])
+    sequence_frame_ids = sorted(int(path.stem) for path in velodyne_dir.glob("*.bin") if int(path.stem) >= first_frame)
     if args.max_frames is not None:
-        frame_ids = frame_ids[: args.max_frames]
+        sequence_frame_ids = sequence_frame_ids[: args.max_frames]
 
     detections_root = Path(args.detections_root) if args.detections_root else REPO_ROOT / "data" / "detections" / args.init_source / "npz"
 
@@ -272,8 +328,8 @@ def main():
         local_crop_radius=args.local_crop_radius,
         local_crop_min_points=args.local_crop_min_points,
         detection_overlap_threshold=args.detection_overlap_thresh,
+        box_height_filter_ratio=args.box_height_filter_ratio,
     )
-    first_frame = frame_ids[0]
     first_coord = load_xyz(velodyne_dir / f"{first_frame:06d}.bin")
     init_box, init_label = select_init_box(
         source=args.init_source,
@@ -316,13 +372,15 @@ def main():
         ),
     )
 
-    for frame_id in frame_ids[1:]:
+    for frame_id in sequence_frame_ids[1:]:
         coord = load_xyz(velodyne_dir / f"{frame_id:06d}.bin")
         pred_centroid = tracker.predict_position().detach().cpu().numpy()
+        gt_record = gt.get(frame_id)
         matched_box, matched_label = match_update_box(
             source=args.init_source,
             frame_id=frame_id,
-            gt_record=gt[frame_id],
+            gt_record=gt_record,
+            target_class=target_class,
             calib=calib,
             detections_root=detections_root / seq,
             score_thresh=args.score_thresh,
@@ -330,7 +388,6 @@ def main():
             match_radius=tracker.gate_radius,
         )
         state = tracker.step(coord, detection_box=matched_box)
-        gt_box = record_to_lidar_box(gt[frame_id], calib)
         rr.set_time("frame", sequence=frame_id)
         rr.log("points", rr.Points3D(coord, colors=point_colors(coord, state)))
         rr.log(
@@ -358,14 +415,15 @@ def main():
                     show_labels=True,
                 ),
             )
+        gt_box = None if gt_record is None else record_to_lidar_box(gt_record, calib)
         rr.log(
             "track/gt_box",
-            rr.Boxes3D(
+            empty_boxes() if gt_box is None else rr.Boxes3D(
                 centers=gt_box[None, :3],
                 sizes=gt_box[None, 3:6],
                 quaternions=box_quaternion(gt_box),
                 colors=np.array([[0, 255, 255]], dtype=np.uint8),
-                labels=[canonical_label(gt[frame_id]["type"])],
+                labels=[canonical_label(gt_record["type"])],
                 show_labels=True,
             ),
         )

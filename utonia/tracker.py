@@ -30,6 +30,7 @@ class UtoniaTracker:
         local_crop_radius: float = 8.0,
         local_crop_min_points: int = 2048,
         detection_overlap_threshold: float = 0.3,
+        box_height_filter_ratio: float = 0.15,
         sim_threshold: float = 0.6,
         init_points: int = 64,
         min_points: int = 64,
@@ -45,6 +46,7 @@ class UtoniaTracker:
         self.local_crop_radius = local_crop_radius
         self.local_crop_min_points = local_crop_min_points
         self.detection_overlap_threshold = detection_overlap_threshold
+        self.box_height_filter_ratio = box_height_filter_ratio
         self.sim_threshold = sim_threshold
         self.init_points = init_points
         self.min_points = min_points
@@ -174,6 +176,24 @@ class UtoniaTracker:
             & (rot_z.abs() <= half[2])
         )
 
+    def filter_box_mask_by_height(
+        self,
+        coord: torch.Tensor,
+        box: torch.Tensor,
+        mask: torch.Tensor,
+        min_points: int,
+    ) -> torch.Tensor:
+        """Remove the bottom band of a box support mask, but fall back if it gets too sparse."""
+        if self.box_height_filter_ratio <= 0:
+            return mask
+
+        bottom_z = box[2] - box[5] * 0.5
+        min_z = bottom_z + box[5] * self.box_height_filter_ratio
+        filtered_mask = mask & (coord[:, 2] >= min_z)
+        if int(filtered_mask.sum()) >= min_points:
+            return filtered_mask
+        return mask
+
     def initialize_from_box(
         self, coord: np.ndarray, box: np.ndarray | list[float]
     ) -> dict[str, np.ndarray | int]:
@@ -185,6 +205,12 @@ class UtoniaTracker:
         self.state.seed_index = int(torch.argmin(dist).detach().cpu())
 
         mask = self.box_mask(coord_t, box_t)
+        mask = self.filter_box_mask_by_height(
+            coord_t,
+            box_t,
+            mask,
+            min_points=self.init_points,
+        )
         if int(mask.sum()) < self.init_points:
             topk = torch.topk(
                 dist, k=min(self.init_points, dist.numel()), largest=False
@@ -274,6 +300,12 @@ class UtoniaTracker:
         if detection_box is not None:
             box_t = torch.as_tensor(detection_box, dtype=torch.float32, device=self.device)
             detection_mask = self.box_mask(coord_t, box_t)
+            detection_mask = self.filter_box_mask_by_height(
+                coord_t,
+                box_t,
+                detection_mask,
+                min_points=self.init_points,
+            )
             overlap = (mask & detection_mask).float().sum() / mask.float().sum().clamp_min(1.0)
             if (
                 int(detection_mask.sum()) >= self.init_points
