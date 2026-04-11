@@ -142,6 +142,10 @@ def point_colors(full_coord: np.ndarray, state) -> np.ndarray:
     return colors
 
 
+def pred_color(status: str) -> np.ndarray:
+    return np.array([[255, 0, 0]], dtype=np.uint8) if status == "active" else np.array([[255, 165, 0]], dtype=np.uint8)
+
+
 def gt_by_frame(records, track_id):
     return {r["frame"]: r for r in records if r["track_id"] == track_id}
 
@@ -273,7 +277,7 @@ def main():
     parser.add_argument(
         "--init-source",
         choices=["gt", "pointpillar", "pointrcnn"],
-        default="pointpillar",
+        default="pointrcnn",
         help="Source of the initialization box on the first frame.",
     )
     parser.add_argument(
@@ -442,7 +446,7 @@ def main():
     )
     rr.log(
         "track/pred",
-        rr.Points3D(init_state["centroid"][None], colors=np.array([[255, 0, 0]], dtype=np.uint8)),
+        rr.Points3D(init_state["centroid"][None], colors=pred_color(init_state["status"]), labels=[init_state["status"]]),
     )
     rr.log("track/used_box", empty_boxes())
     rr.log(
@@ -484,7 +488,7 @@ def main():
         )
         rr.log(
             "track/pred",
-            rr.Points3D(state["centroid"][None], colors=np.array([[255, 0, 0]], dtype=np.uint8)),
+            rr.Points3D(state["centroid"][None], colors=pred_color(state["status"]), labels=[state["status"]]),
         )
         if state["used_box"] is None:
             rr.log("track/used_box", empty_boxes())

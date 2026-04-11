@@ -14,6 +14,9 @@ class TrackerState:
     centroid: torch.Tensor | None = None
     velocity: torch.Tensor | None = None
     seed_index: int | None = None
+    support_height: float = 0.0
+    status: str = "active"
+    bad_frames: int = 0
 
 
 class UtoniaTracker:
@@ -31,6 +34,8 @@ class UtoniaTracker:
         local_crop_min_points: int = 2048,
         detection_overlap_threshold: float = 0.3,
         box_height_filter_ratio: float = 0.15,
+        lost_height_ratio: float = 0.5,
+        lost_bad_frames: int = 2,
         sim_threshold: float = 0.6,
         init_points: int = 64,
         min_points: int = 64,
@@ -47,6 +52,8 @@ class UtoniaTracker:
         self.local_crop_min_points = local_crop_min_points
         self.detection_overlap_threshold = detection_overlap_threshold
         self.box_height_filter_ratio = box_height_filter_ratio
+        self.lost_height_ratio = lost_height_ratio
+        self.lost_bad_frames = lost_bad_frames
         self.sim_threshold = sim_threshold
         self.init_points = init_points
         self.min_points = min_points
@@ -148,6 +155,9 @@ class UtoniaTracker:
         self.state.prototype = F.normalize(feat[mask].mean(0), dim=0)
         self.state.centroid = coord_t[mask].mean(0)
         self.state.velocity = torch.zeros(3, dtype=torch.float32, device=self.device)
+        self.state.support_height = float((coord_t[mask, 2].max() - coord_t[mask, 2].min()).detach().cpu())
+        self.state.status = "active"
+        self.state.bad_frames = 0
         sim = feat @ self.state.prototype
         return {
             "coord": coord_t.detach().cpu().numpy(),
@@ -156,6 +166,7 @@ class UtoniaTracker:
             "centroid": self.state.centroid.detach().cpu().numpy(),
             "seed_index": self.state.seed_index,
             "crop_indices": crop_indices,
+            "status": self.state.status,
         }
 
     def box_mask(self, coord: torch.Tensor, box: torch.Tensor) -> torch.Tensor:
@@ -240,6 +251,9 @@ class UtoniaTracker:
         self.state.prototype = F.normalize(feat[mask].mean(0), dim=0)
         self.state.centroid = coord_t[mask].mean(0)
         self.state.velocity = torch.zeros(3, dtype=torch.float32, device=self.device)
+        self.state.support_height = float((coord_t[mask, 2].max() - coord_t[mask, 2].min()).detach().cpu())
+        self.state.status = "active"
+        self.state.bad_frames = 0
         sim = feat @ self.state.prototype
         return {
             "coord": coord_t.detach().cpu().numpy(),
@@ -249,6 +263,7 @@ class UtoniaTracker:
             "seed_index": self.state.seed_index,
             "box_center": center.detach().cpu().numpy(),
             "crop_indices": crop_indices,
+            "status": self.state.status,
         }
 
     def predict_position(self) -> torch.Tensor:
@@ -307,16 +322,55 @@ class UtoniaTracker:
             dim=0,
         )
 
+    def motion_only_step(self) -> dict[str, np.ndarray | int | None | str]:
+        """Propagate the track with constant velocity after it is marked lost."""
+        self.state.centroid = self.predict_position()
+        return {
+            "coord": np.zeros((0, 3), dtype=np.float32),
+            "sim": np.zeros((0,), dtype=np.float32),
+            "mask": np.zeros((0,), dtype=bool),
+            "centroid": self.state.centroid.detach().cpu().numpy(),
+            "anchor_index": None,
+            "crop_indices": np.zeros((0,), dtype=np.int64),
+            "used_box": None,
+            "status": self.state.status,
+        }
+
+    def is_bad_update(
+        self,
+        coord: torch.Tensor,
+        feat: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> bool:
+        """Check whether the current support looks like a tracking failure."""
+        weight = (feat[mask] @ self.state.prototype).clamp_min(0) + 1e-6
+        candidate_centroid = torch.sum(coord[mask] * weight[:, None], dim=0) / weight.sum()
+        jump_xy = torch.linalg.norm(candidate_centroid[:2] - self.predict_position()[:2])
+        support_height = coord[mask, 2].max() - coord[mask, 2].min()
+        height_collapse = support_height < self.state.support_height * self.lost_height_ratio
+        sudden_jump = jump_xy > self.gate_radius
+        return bool((height_collapse | sudden_jump).detach().cpu())
+
     def step(
         self,
         coord: np.ndarray,
         detection_box: np.ndarray | list[float] | None = None,
     ) -> dict[str, np.ndarray | int | None]:
         """Track one frame and optionally use a matched detection box to refresh the prototype."""
+        if self.state.status == "lost":
+            return self.motion_only_step()
+
         coord_t, feat, crop_indices = self.encode_frame(coord, center=self.predict_position())
         sim = feat @ self.state.prototype
         score = self.score_points(coord_t, feat)
         mask = self.extract_target(coord_t, sim, score)
+        if self.is_bad_update(coord_t, feat, mask):
+            self.state.bad_frames += 1
+            if self.state.bad_frames >= self.lost_bad_frames:
+                self.state.status = "lost"
+            return self.motion_only_step()
+        self.state.bad_frames = 0
+
         used_box = None
         prototype_mask = mask
         if detection_box is not None:
@@ -345,6 +399,7 @@ class UtoniaTracker:
             "anchor_index": anchor_index,
             "crop_indices": crop_indices,
             "used_box": used_box,
+            "status": self.state.status,
         }
 
     def track_sequence(
