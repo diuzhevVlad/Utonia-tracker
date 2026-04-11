@@ -194,6 +194,25 @@ class UtoniaTracker:
             return filtered_mask
         return mask
 
+    def filter_mask_by_height(
+        self,
+        coord: torch.Tensor,
+        mask: torch.Tensor,
+        min_points: int,
+    ) -> torch.Tensor:
+        """Remove the lowest vertical band from a support mask, with fallback if it gets too sparse."""
+        if self.box_height_filter_ratio <= 0 or int(mask.sum()) == 0:
+            return mask
+
+        z_values = coord[mask, 2]
+        z_min = z_values.min()
+        z_max = z_values.max()
+        min_z = z_min + (z_max - z_min) * self.box_height_filter_ratio
+        filtered_mask = mask & (coord[:, 2] >= min_z)
+        if int(filtered_mask.sum()) >= min_points:
+            return filtered_mask
+        return mask
+
     def initialize_from_box(
         self, coord: np.ndarray, box: np.ndarray | list[float]
     ) -> dict[str, np.ndarray | int]:
@@ -237,12 +256,13 @@ class UtoniaTracker:
         return self.state.centroid + self.state.velocity
 
     def score_points(self, coord: torch.Tensor, feat: torch.Tensor) -> torch.Tensor:
-        """Combine appearance similarity and motion gating into one score per point."""
+        """Combine appearance similarity and xy motion gating into one score per point."""
         sim = feat @ self.state.prototype
-        dist = torch.linalg.norm(coord - self.predict_position(), dim=1)
-        score = sim - self.alpha * (dist / self.gate_radius)
-        score[dist > self.gate_radius] = -1e9
-        if torch.all(dist > self.gate_radius):
+        delta_xy = coord[:, :2] - self.predict_position()[:2]
+        dist_xy = torch.linalg.norm(delta_xy, dim=1)
+        score = sim - self.alpha * (dist_xy / self.gate_radius)
+        score[dist_xy > self.gate_radius] = -1e9
+        if torch.all(dist_xy > self.gate_radius):
             score = sim
         return score
 
@@ -254,10 +274,12 @@ class UtoniaTracker:
         mask = (
             torch.linalg.norm(coord - coord[anchor], dim=1) < self.cluster_radius
         ) & (sim > self.sim_threshold)
+        mask = self.filter_mask_by_height(coord, mask, min_points=self.min_points)
         if int(mask.sum()) < self.min_points:
             topk = torch.topk(score, k=min(self.min_points, score.numel())).indices
             mask = torch.zeros_like(mask)
             mask[topk] = True
+            mask = self.filter_mask_by_height(coord, mask, min_points=self.min_points)
         return mask
 
     def update_state(

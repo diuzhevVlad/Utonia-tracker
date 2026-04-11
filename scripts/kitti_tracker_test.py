@@ -19,6 +19,38 @@ from pcdet.utils.box_utils import boxes3d_kitti_camera_to_lidar  # noqa: E402
 from pcdet.utils.calibration_kitti import Calibration  # noqa: E402
 
 
+TRACKER_PRESETS = {
+    "Car": {
+        "gate_radius": 5.0,
+        "cluster_radius": 1.6,
+        "init_points": 64,
+        "min_points": 64,
+        "box_height_filter_ratio": 0.15,
+    },
+    "Van": {
+        "gate_radius": 5.0,
+        "cluster_radius": 1.6,
+        "init_points": 64,
+        "min_points": 64,
+        "box_height_filter_ratio": 0.15,
+    },
+    "Cyclist": {
+        "gate_radius": 2.5,
+        "cluster_radius": 1.0,
+        "init_points": 24,
+        "min_points": 24,
+        "box_height_filter_ratio": 0.10,
+    },
+    "Pedestrian": {
+        "gate_radius": 1.5,
+        "cluster_radius": 0.7,
+        "init_points": 16,
+        "min_points": 16,
+        "box_height_filter_ratio": 0.10,
+    },
+}
+
+
 def load_xyz(path: Path) -> np.ndarray:
     return np.fromfile(path, dtype=np.float32).reshape(-1, 4)[:, :3].copy()
 
@@ -82,6 +114,16 @@ def resolve_track_id(
     if track_id is None:
         raise RuntimeError("No default frame-0 Car/Van track found")
     return track_id
+
+
+def resolve_tracker_param(
+    override: float | int | None,
+    target_class: str,
+    key: str,
+):
+    if override is not None:
+        return override
+    return TRACKER_PRESETS.get(target_class, TRACKER_PRESETS["Car"])[key]
 
 
 def canonical_label(name: str) -> str:
@@ -231,7 +273,7 @@ def main():
     parser.add_argument(
         "--init-source",
         choices=["gt", "pointpillar", "pointrcnn"],
-        default="pointrcnn",
+        default="pointpillar",
         help="Source of the initialization box on the first frame.",
     )
     parser.add_argument(
@@ -282,10 +324,34 @@ def main():
         help="Use a matched detection box only if it overlaps enough with the tracked points.",
     )
     parser.add_argument(
+        "--gate-radius",
+        type=float,
+        default=None,
+        help="Override the xy motion gate radius. Defaults to a class-aware preset.",
+    )
+    parser.add_argument(
+        "--cluster-radius",
+        type=float,
+        default=None,
+        help="Override the target clustering radius. Defaults to a class-aware preset.",
+    )
+    parser.add_argument(
+        "--init-points",
+        type=int,
+        default=None,
+        help="Override minimum support points during initialization. Defaults to a class-aware preset.",
+    )
+    parser.add_argument(
+        "--min-points",
+        type=int,
+        default=None,
+        help="Override minimum support points during tracking. Defaults to a class-aware preset.",
+    )
+    parser.add_argument(
         "--box-height-filter-ratio",
         type=float,
-        default=0.15,
-        help="Ignore the bottom ratio of box-supported points when building track support masks.",
+        default=None,
+        help="Ignore the bottom ratio of support masks. Defaults to a class-aware preset.",
     )
     parser.add_argument(
         "--max-frames",
@@ -318,17 +384,36 @@ def main():
     if args.max_frames is not None:
         sequence_frame_ids = sequence_frame_ids[: args.max_frames]
 
+    gate_radius = resolve_tracker_param(args.gate_radius, target_class, "gate_radius")
+    cluster_radius = resolve_tracker_param(args.cluster_radius, target_class, "cluster_radius")
+    init_points = resolve_tracker_param(args.init_points, target_class, "init_points")
+    min_points = resolve_tracker_param(args.min_points, target_class, "min_points")
+    box_height_filter_ratio = resolve_tracker_param(
+        args.box_height_filter_ratio,
+        target_class,
+        "box_height_filter_ratio",
+    )
+
+    print(
+        f"Tracking track_id={track_id} class={target_class} "
+        f"gate_radius={gate_radius} cluster_radius={cluster_radius} "
+        f"init_points={init_points} min_points={min_points} "
+        f"box_height_filter_ratio={box_height_filter_ratio}"
+    )
+
     detections_root = Path(args.detections_root) if args.detections_root else REPO_ROOT / "data" / "detections" / args.init_source / "npz"
 
     tracker = UtoniaTracker(
         mode=args.tracker_mode,
         init_radius=1.6,
-        cluster_radius=1.6,
-        gate_radius=5.0,
+        cluster_radius=cluster_radius,
+        gate_radius=gate_radius,
         local_crop_radius=args.local_crop_radius,
         local_crop_min_points=args.local_crop_min_points,
+        init_points=init_points,
+        min_points=min_points,
         detection_overlap_threshold=args.detection_overlap_thresh,
-        box_height_filter_ratio=args.box_height_filter_ratio,
+        box_height_filter_ratio=box_height_filter_ratio,
     )
     first_coord = load_xyz(velodyne_dir / f"{first_frame:06d}.bin")
     init_box, init_label = select_init_box(
