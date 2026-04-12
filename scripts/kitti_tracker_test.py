@@ -64,6 +64,13 @@ def parse_labels(path: Path):
                 "frame": int(parts[0]),
                 "track_id": int(parts[1]),
                 "type": parts[2],
+                "truncation": float(parts[3]),
+                "occlusion": int(parts[4]),
+                "alpha": float(parts[5]),
+                "bbox_left": float(parts[6]),
+                "bbox_top": float(parts[7]),
+                "bbox_right": float(parts[8]),
+                "bbox_bottom": float(parts[9]),
                 "h": float(parts[10]),
                 "w": float(parts[11]),
                 "l": float(parts[12]),
@@ -225,31 +232,45 @@ def match_update_box(
     score_thresh: float,
     pred_centroid: np.ndarray,
     match_radius: float,
-) -> tuple[np.ndarray | None, str | None]:
+) -> tuple[np.ndarray | None, str | None, dict]:
     if source == "gt":
         if gt_record is None:
-            return None, None
-        return record_to_lidar_box(gt_record, calib), canonical_label(gt_record["type"])
+            return None, None, {"matched_detection_found": False, "matched_detection_distance": None, "matched_detection_score": None}
+        gt_box = record_to_lidar_box(gt_record, calib)
+        gt_distance = float(np.linalg.norm(gt_box[:2] - pred_centroid[:2]))
+        return gt_box, canonical_label(gt_record["type"]), {
+            "matched_detection_found": True,
+            "matched_detection_distance": gt_distance,
+            "matched_detection_score": 1.0,
+        }
 
     boxes, scores, labels = load_detection_boxes(
         detections_root / f"{frame_id:06d}.npz",
         score_thresh,
     )
     if len(boxes) == 0:
-        return None, None
+        return None, None, {"matched_detection_found": False, "matched_detection_distance": None, "matched_detection_score": None}
 
     keep = np.array([label_to_name(label) == canonical_label(target_class) for label in labels], dtype=bool)
     if not keep.any():
-        return None, None
+        return None, None, {"matched_detection_found": False, "matched_detection_distance": None, "matched_detection_score": None}
     boxes = boxes[keep]
     scores = scores[keep]
     labels = labels[keep]
 
-    distances = np.linalg.norm(boxes[:, :3] - pred_centroid[None], axis=1)
+    distances = np.linalg.norm(boxes[:, :2] - pred_centroid[None, :2], axis=1)
     best = int(np.argmin(distances))
     if distances[best] > match_radius:
-        return None, None
-    return boxes[best], f"{label_to_name(labels[best])} {scores[best]:.2f}"
+        return None, None, {
+            "matched_detection_found": False,
+            "matched_detection_distance": float(distances[best]),
+            "matched_detection_score": float(scores[best]),
+        }
+    return boxes[best], f"{label_to_name(labels[best])} {scores[best]:.2f}", {
+        "matched_detection_found": True,
+        "matched_detection_distance": float(distances[best]),
+        "matched_detection_score": float(scores[best]),
+    }
 
 
 def box_quaternion(box: np.ndarray) -> np.ndarray:
@@ -279,6 +300,12 @@ def main():
         choices=["gt", "pointpillar", "pointrcnn"],
         default="pointrcnn",
         help="Source of the initialization box on the first frame.",
+    )
+    parser.add_argument(
+        "--update-source",
+        choices=["gt", "pointpillar", "pointrcnn"],
+        default=None,
+        help="Source of the per-frame matched box updates. Defaults to the init source.",
     )
     parser.add_argument(
         "--track-id",
@@ -364,6 +391,12 @@ def main():
         help="Optional frame limit for quick debugging.",
     )
     parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=None,
+        help="Optional absolute frame id to start logging/visualizing from after internal warmup.",
+    )
+    parser.add_argument(
         "--no-spawn",
         action="store_true",
         help="Do not spawn the rerun viewer automatically.",
@@ -385,8 +418,10 @@ def main():
     first_frame = annotated_frame_ids[0]
     target_class = canonical_label(gt[first_frame]["type"])
     sequence_frame_ids = sorted(int(path.stem) for path in velodyne_dir.glob("*.bin") if int(path.stem) >= first_frame)
+    visible_start = args.start_frame if args.start_frame is not None else first_frame
     if args.max_frames is not None:
-        sequence_frame_ids = sequence_frame_ids[: args.max_frames]
+        end_frame = visible_start + args.max_frames - 1
+        sequence_frame_ids = [frame_id for frame_id in sequence_frame_ids if frame_id <= end_frame]
 
     gate_radius = resolve_tracker_param(args.gate_radius, target_class, "gate_radius")
     cluster_radius = resolve_tracker_param(args.cluster_radius, target_class, "cluster_radius")
@@ -405,7 +440,10 @@ def main():
         f"box_height_filter_ratio={box_height_filter_ratio}"
     )
 
-    detections_root = Path(args.detections_root) if args.detections_root else REPO_ROOT / "data" / "detections" / args.init_source / "npz"
+    update_source = args.update_source or args.init_source
+    detections_root = Path(args.detections_root) if args.detections_root else REPO_ROOT / "data" / "detections"
+    init_detections_root = detections_root / args.init_source / "npz"
+    update_detections_root = detections_root / update_source / "npz"
 
     tracker = UtoniaTracker(
         mode=args.tracker_mode,
@@ -425,60 +463,20 @@ def main():
         first_frame=first_frame,
         gt_record=gt[first_frame],
         calib=calib,
-        detections_root=detections_root / seq,
+        detections_root=init_detections_root / seq,
         score_thresh=args.score_thresh,
     )
     init_state = tracker.initialize_from_box(first_coord, init_box)
     gt_box = record_to_lidar_box(gt[first_frame], calib)
 
     rr.init("utonia_kitti_tracker", spawn=not args.no_spawn)
-    rr.set_time("frame", sequence=first_frame)
-    rr.log(
-        "points",
-        rr.Points3D(first_coord, colors=point_colors(first_coord, init_state)),
-    )
-    rr.log(
-        "track/object",
-        rr.Points3D(
-            init_state["coord"][init_state["mask"]],
-            colors=np.tile([[0, 255, 0]], (int(init_state["mask"].sum()), 1)),
-        ),
-    )
-    rr.log(
-        "track/pred",
-        rr.Points3D(init_state["centroid"][None], colors=pred_color(init_state["status"]), labels=[init_state["status"]]),
-    )
-    rr.log("track/used_box", empty_boxes())
-    rr.log(
-        "track/gt_box",
-        rr.Boxes3D(
-            centers=gt_box[None, :3],
-            sizes=gt_box[None, 3:6],
-            quaternions=box_quaternion(gt_box),
-            colors=np.array([[0, 255, 255]], dtype=np.uint8),
-            labels=[canonical_label(gt[first_frame]["type"])],
-            show_labels=True,
-        ),
-    )
 
-    for frame_id in sequence_frame_ids[1:]:
-        coord = load_xyz(velodyne_dir / f"{frame_id:06d}.bin")
-        pred_centroid = tracker.predict_position().detach().cpu().numpy()
-        gt_record = gt.get(frame_id)
-        matched_box, matched_label = match_update_box(
-            source=args.init_source,
-            frame_id=frame_id,
-            gt_record=gt_record,
-            target_class=target_class,
-            calib=calib,
-            detections_root=detections_root / seq,
-            score_thresh=args.score_thresh,
-            pred_centroid=pred_centroid,
-            match_radius=tracker.gate_radius,
-        )
-        state = tracker.step(coord, detection_box=matched_box)
+    def log_frame(frame_id: int, full_coord: np.ndarray, state, gt_record, matched_label: str | None) -> None:
         rr.set_time("frame", sequence=frame_id)
-        rr.log("points", rr.Points3D(coord, colors=point_colors(coord, state)))
+        rr.log(
+            "points",
+            rr.Points3D(full_coord, colors=point_colors(full_coord, state)),
+        )
         rr.log(
             "track/object",
             rr.Points3D(
@@ -490,7 +488,7 @@ def main():
             "track/pred",
             rr.Points3D(state["centroid"][None], colors=pred_color(state["status"]), labels=[state["status"]]),
         )
-        if state["used_box"] is None:
+        if state.get("used_box") is None:
             rr.log("track/used_box", empty_boxes())
         else:
             rr.log(
@@ -500,22 +498,44 @@ def main():
                     sizes=state["used_box"][None, 3:6],
                     quaternions=box_quaternion(state["used_box"]),
                     colors=np.array([[255, 255, 0]], dtype=np.uint8),
-                    labels=[f"used {args.init_source}: {matched_label}"],
+                    labels=[f"used {args.init_source}: {matched_label or 'matched'}"],
                     show_labels=True,
                 ),
             )
-        gt_box = None if gt_record is None else record_to_lidar_box(gt_record, calib)
+        gt_box_local = None if gt_record is None else record_to_lidar_box(gt_record, calib)
         rr.log(
             "track/gt_box",
-            empty_boxes() if gt_box is None else rr.Boxes3D(
-                centers=gt_box[None, :3],
-                sizes=gt_box[None, 3:6],
-                quaternions=box_quaternion(gt_box),
+            empty_boxes() if gt_box_local is None else rr.Boxes3D(
+                centers=gt_box_local[None, :3],
+                sizes=gt_box_local[None, 3:6],
+                quaternions=box_quaternion(gt_box_local),
                 colors=np.array([[0, 255, 255]], dtype=np.uint8),
                 labels=[canonical_label(gt_record["type"])],
                 show_labels=True,
             ),
         )
+
+    if first_frame >= visible_start:
+        log_frame(first_frame, first_coord, init_state, gt[first_frame], matched_label=None)
+
+    for frame_id in sequence_frame_ids[1:]:
+        coord = load_xyz(velodyne_dir / f"{frame_id:06d}.bin")
+        pred_centroid = tracker.predict_position().detach().cpu().numpy()
+        gt_record = gt.get(frame_id)
+        matched_box, matched_label, _ = match_update_box(
+            source=update_source,
+            frame_id=frame_id,
+            gt_record=gt_record,
+            target_class=target_class,
+            calib=calib,
+            detections_root=update_detections_root / seq,
+            score_thresh=args.score_thresh,
+            pred_centroid=pred_centroid,
+            match_radius=tracker.gate_radius,
+        )
+        state = tracker.step(coord, detection_box=matched_box)
+        if frame_id >= visible_start:
+            log_frame(frame_id, coord, state, gt_record, matched_label)
 
 
 if __name__ == "__main__":
