@@ -1,0 +1,173 @@
+# Changelog
+
+## 2026-05-19
+- Ran class-specific low-score threshold ablations on KITTI MOT sequences `0019` and `0020`; the best no-validation Pedestrian setting was `official_mot_pedlow035_peddist15` with Pedestrian `HOTA=35.391`, `MOTA=24.413`, `IDF1=56.201`, while Car stayed unchanged at `HOTA=54.315`, `IDF1=68.337`.
+- Ran low-score gate ablations around `--pedestrian-low-score-thresh 0.35`; `--low-score-max-distance-pedestrian 1.5` gave the best Pedestrian HOTA/IDF1 tradeoff, while IoU/cost gates improved precision and Car metrics but reduced Pedestrian association quality.
+- Ran fallback score and fallback max-frame ablations around the Pedestrian-gated setup; fallback scores `0.05`, `0.10`, `0.15`, and `0.20` were effectively tied, while `--fallback-max-frames 1` regressed Pedestrian to `HOTA=34.907`, `IDF1=55.633`.
+- Ran Utonia low-score validation ablations on the Pedestrian-gated setup: `val045_sim070`, `val045_sim095`, `val050_sim095`, `val050_sim099`, `val050_sim0995`, `val050_sim0999`, and `val055_sim0995`.
+- Selected `official_mot_pedlow035_peddist15_val050_sim0995` as the best current no-training Utonia MOT configuration: Car stayed unchanged (`HOTA=54.315`, `MOTA=38.393`, `IDF1=68.337`), while Pedestrian improved to `HOTA=37.108`, `MOTA=28.362`, `IDF1=59.372`, `FP=2355`, `FN=1811`, `IDSW=42`.
+- Diagnostics for `official_mot_pedlow035_peddist15_val050_sim0995`: `1075` Utonia low-score validations, `218` Utonia low-score rejects (`155` similarity rejects, `63` sparse-support rejects), `84` accepted Pedestrian Utonia fallback events, and `12` rejected fallback events.
+- Generated Rerun recording for the new selected Utonia MOT run on KITTI sequence `0019`, frames `000000-000249`: `data/rerun/official_mot_pedlow035_peddist15_val050_sim0995_0019_000000_000249.rrd`.
+- Updated `KITTI_MOT_REPORT.md` with the low-score threshold/gate sweep, fallback score/budget sweep, Utonia low-score validation sweep, selected command, diagnostics, and new Rerun recording.
+- Verified the final MOT scripts compile with `conda run -n utonia python -m py_compile scripts/run_kitti_mot_utonia.py scripts/eval_kitti_mot_trackeval.py scripts/visualize_kitti_mot_rerun.py`.
+- Added class-specific low-score continuation thresholds to `scripts/run_kitti_mot_utonia.py`: `--car-low-score-thresh` and `--pedestrian-low-score-thresh`.
+- Added low-score association gates to `scripts/run_kitti_mot_utonia.py`: `--low-score-max-cost`, `--low-score-min-iou`, `--low-score-max-distance-car`, and `--low-score-max-distance-pedestrian`.
+- Added optional Utonia validation for weak low-score detector updates with `--validate-low-score-utonia`, class/score filters, similarity threshold, and per-class support thresholds.
+- Extended MOT diagnostics and summaries with low-score gate rejects, Utonia low-score validation counts/rejects, validation similarity, validation support, low-score distance, low-score IoU, and low-score rejection reasons.
+- Verified the new low-score ablation controls compile with `conda run -n utonia python -m py_compile scripts/run_kitti_mot_utonia.py scripts/eval_kitti_mot_trackeval.py`.
+- Added opt-in support-point fallback box refinement to `scripts/run_kitti_mot_utonia.py` via `--fallback-refine-box {none,support_z,support_3d}`, with dimension clamp and center-blend controls.
+- Extended MOT diagnostics with fallback refinement fields: `fallback_refined`, `fallback_refine_reason`, `refined_dx`, `refined_dy`, and `refined_dz`.
+- Verified the fallback refinement changes compile with `conda run -n utonia python -m py_compile scripts/run_kitti_mot_utonia.py scripts/eval_kitti_mot_trackeval.py scripts/visualize_kitti_mot_rerun.py`.
+- Ran smoke `smoke_mot_low03_utonia_ped_refine_z_0019_200f`; it produced `1278` rows and `8` Utonia fallback events in the first `200` frames.
+- Ran full Pedestrian-only fallback refinement experiment `official_mot_low03_utonia_ped_refine_z`; it produced `37` Pedestrian Utonia fallback events.
+- Evaluated `official_mot_low03_utonia_ped_refine_z` with TrackEval: Car stayed at `HOTA=54.315`, `IDF1=68.337`, while Pedestrian regressed to `HOTA=33.135`, `MOTA=19.084`, `IDF1=52.497`, `FN=1748`.
+- Ran full Pedestrian-only 3D support refinement experiment `official_mot_low03_utonia_ped_refine_3d`; it produced `36` Pedestrian Utonia fallback events.
+- Evaluated `official_mot_low03_utonia_ped_refine_3d` with TrackEval: Car stayed at `HOTA=54.315`, `IDF1=68.337`, while Pedestrian regressed to `HOTA=33.117`, `MOTA=19.067`, `IDF1=52.459`, `FN=1752`.
+- Ran strict all-class 3D support refinement experiment `official_mot_low03_utonia_strict_all_refine_3d`; it produced `45` Utonia fallback events (`33` Pedestrian, `12` Car) but still had many rejected Car candidates.
+- Evaluated `official_mot_low03_utonia_strict_all_refine_3d` with TrackEval: Car remained worse than the selected Pedestrian-only default (`HOTA=54.264`, `MOTA=38.183`, `IDF1=68.270`), and Pedestrian regressed to `HOTA=33.119`, `IDF1=52.463`.
+- Updated `KITTI_MOT_REPORT.md` with the support-point box refinement ablations and concluded that direct support-mask geometry refinement should stay disabled by default.
+- Implemented the one-day Utonia MOT plan in `scripts/run_kitti_mot_utonia.py`: added `--utonia-fallback-classes` with default `Pedestrian`, lowered default fallback score to `0.15`, and added strict fallback projection gates for maximum bbox width, height, and image-area ratio.
+- Extended MOT fallback diagnostics with projected fallback bbox width and height so accepted/rejected Utonia events can be audited.
+- Verified the one-day MOT changes compile with `conda run -n utonia python -m py_compile scripts/run_kitti_mot_utonia.py scripts/eval_kitti_mot_trackeval.py scripts/visualize_kitti_mot_rerun.py`.
+- Ran smoke `smoke_mot_low03_utonia_ped_only_0019_50f`; it produced `328` rows, `199` low-score matches, and `0` Pedestrian Utonia fallback events in the first `50` frames.
+- Ran full Pedestrian-only Utonia fallback experiment `official_mot_low03_utonia_ped_only`; it produced `15143` rows, `306` tracks, `5983` low-score matches, and `37` Utonia fallback events, all Pedestrian.
+- Evaluated `official_mot_low03_utonia_ped_only` with TrackEval: Car matched the low-score baseline exactly (`HOTA=54.315`, `MOTA=38.393`, `IDF1=68.337`, `IDSW=11`); Pedestrian improved slightly to `HOTA=33.194`, `MOTA=19.288`, `IDF1=52.580`, `FN=1739`.
+- Ran stricter Pedestrian-only Utonia experiment `official_mot_low03_utonia_ped_strict` with `--fallback-sim-thresh 0.65`, `--fallback-max-frames 3`, and `--fallback-score 0.10`; it produced `34` Pedestrian Utonia fallback events.
+- Evaluated `official_mot_low03_utonia_ped_strict` with TrackEval: Car remained unchanged, while Pedestrian was slightly below the non-strict Pedestrian-only run (`HOTA=33.191`, `IDF1=52.562`, `FN=1741`).
+- Ran optional strict all-class Utonia experiment `official_mot_low03_utonia_strict_all`; it produced `45` Utonia fallback events (`34` Pedestrian, `11` Car) and exposed remaining Car projection issues.
+- Evaluated `official_mot_low03_utonia_strict_all` with TrackEval: Car regressed to `HOTA=54.264`, `MOTA=38.183`, `IDF1=68.270`, confirming Car fallback should stay disabled by default; Pedestrian matched the strict Pedestrian-only run.
+- Selected `official_mot_low03_utonia_ped_only` as the working one-day Utonia MOT tracker because it preserves Car metrics, improves Pedestrian slightly, and has nonzero measurable Utonia fallback events.
+- Generated Rerun recording for the selected Utonia MOT run on KITTI sequence `0019`, frames `000000-000249`: `data/rerun/official_mot_low03_utonia_ped_only_0019_000000_000249.rrd` (`223M`), with visible fallback events on frames including `125`, `143-147`, and `184-185`.
+- Updated `KITTI_MOT_REPORT.md` with the one-day Utonia tracker implementation, final ablation table, fallback diagnostics, selected default run, and Rerun command.
+- Added `scripts/visualize_kitti_mot_rerun.py` to visualize KITTI MOT runs in Rerun, including LiDAR points, GT boxes, predicted track boxes, track IDs, detector scores, and event-colored lifecycle states from `diagnostics.csv`.
+- Verified `scripts/visualize_kitti_mot_rerun.py` compiles in the `utonia` conda environment.
+- Generated Rerun recording for the current best MOT configuration `official_mot_pointpillar_score07_low03` on KITTI sequence `0019`, frames `000000-000249`: `data/rerun/official_mot_pointpillar_score07_low03_0019_000000_000249.rrd` (`223M`).
+- Started MOT detector-gap ablation implementation in `scripts/run_kitti_mot_utonia.py`.
+- Added ByteTrack-style low-score continuation controls to the KITTI MOT runner: `--use-low-score-continuation` and `--low-score-thresh`; low-score detections can continue active tracks but do not spawn new tracks.
+- Added targeted Utonia fallback controls to the KITTI MOT runner: `--utonia-fallback`, `--fallback-max-frames`, `--fallback-sim-thresh`, per-class fallback support thresholds, and fallback output score.
+- Added Utonia fallback diagnostics to MOT outputs, including support count, mean similarity, jump distance, fallback rejection reason, low-score match counts, and fallback counts.
+- Avoided unnecessary Utonia detection-embedding extraction when running fallback-only MOT experiments with `--appearance-mode none`.
+- Stopped an overly broad full-split Utonia fallback run after it consumed GPU without frame progress, then constrained fallback to recent detector-miss tracks with `--fallback-max-candidates-per-frame` so the experiment targets the intended detector-dropout cases.
+- Added `--fallback-start-score-thresh` so Utonia fallback can be initialized only from reliable detector boxes while still allowing Utonia to continue an accepted fallback chain.
+- Verified MOT runner syntax with `conda run -n utonia python -m py_compile scripts/run_kitti_mot_utonia.py scripts/eval_kitti_mot_trackeval.py`.
+- Ran low-score continuation smoke `smoke_mot_low_score_0019_10f`; it produced `65` rows, `25` low-score continuations, and no Utonia fallback.
+- Ran full low-score continuation experiment `official_mot_pointpillar_score07_low03` on KITTI tracking sequences `0019` and `0020`; it produced `15103` rows, `307` tracks, and `5980` low-score continuations.
+- Evaluated `official_mot_pointpillar_score07_low03` with TrackEval: Car `HOTA=54.315`, `MOTA=38.393`, `IDF1=68.337`, `IDSW=11`; Pedestrian `HOTA=33.089`, `MOTA=19.152`, `IDF1=52.432`, `IDSW=67`.
+- Ran targeted Utonia fallback smoke `smoke_mot_low03_utonia_fallback_targeted_0019_50f`; it produced `330` rows and `2` Utonia fallback continuations.
+- Ran full targeted Utonia fallback experiment `official_mot_pointpillar_score07_low03_utonia_fallback_targeted` with low-score continuation, `--fallback-start-score-thresh 0.7`, and `--fallback-max-candidates-per-frame 2`; it produced `15284` rows, `307` tracks, `5988` low-score continuations, and `173` Utonia fallback continuations.
+- Evaluated `official_mot_pointpillar_score07_low03_utonia_fallback_targeted` with TrackEval: Car `HOTA=53.711`, `MOTA=36.362`, `IDF1=67.730`, `IDSW=11`; Pedestrian `HOTA=33.193`, `MOTA=19.288`, `IDF1=52.580`, `IDSW=67`.
+- Summarized MOT low-score and targeted-Utonia ablations in `KITTI_MOT_REPORT.md`, including accepted fallback counts by class and rejection reasons.
+- Added `scripts/run_kitti_mot_utonia.py`, a no-training KITTI MOT tracking-by-detection baseline with detector input, class-wise NMS, Hungarian association, lifecycle management, KITTI tracking result export, and optional Utonia box-embedding association.
+- Added `scripts/eval_kitti_mot_trackeval.py`, a TrackEval wrapper that prepares KITTI `label_02`, `evaluate_tracking.seqmap.training`, tracker result layout, and runs official KITTI 2D box MOT protocol for HOTA, CLEAR, and Identity metrics.
+- Smoke-tested `scripts/run_kitti_mot_utonia.py` on sequence `0019` for `5` frames with PointPillars detections; generated KITTI result files under `data/mot_kitti/smoke_mot_pointpillar_0019_5f/data`.
+- Smoke-tested `scripts/eval_kitti_mot_trackeval.py` on the generated smoke MOT output; TrackEval accepted the KITTI format and produced HOTA/CLEAR/Identity tables.
+- Ran official-protocol MOT baseline `official_mot_pointpillar_motion_iou` on sequences `0019` and `0020` with PointPillars, `score_thresh=0.3`, geometry-only association, and `max_age=5`; generated `26823` result rows and `2239` tracks.
+- Evaluated `official_mot_pointpillar_motion_iou` with TrackEval KITTI 2D box protocol: Car `HOTA=52.218`, `MOTA=17.752`, `IDF1=64.049`; Pedestrian `HOTA=28.664`, `MOTA=-67.399`, `IDF1=41.086`.
+- Ran tuned official-protocol MOT baseline `official_mot_pointpillar_motion_iou_score07` with PointPillars `score_thresh=0.7`; generated `9123` result rows and `487` tracks.
+- Evaluated `official_mot_pointpillar_motion_iou_score07` with TrackEval: Car `HOTA=52.930`, `MOTA=41.246`, `IDF1=66.067`; Pedestrian `HOTA=23.712`, `MOTA=21.876`, `IDF1=37.242`.
+- Ran detector comparison `official_mot_pointrcnn_motion_iou_score05` with PointRCNN `score_thresh=0.5`; generated `11707` result rows and `815` tracks.
+- Evaluated `official_mot_pointrcnn_motion_iou_score05` with TrackEval: Car `HOTA=48.423`, `MOTA=34.541`, `IDF1=61.043`; Pedestrian `HOTA=28.521`, `MOTA=13.364`, `IDF1=46.540`.
+- Smoke-tested Utonia appearance association with `smoke_mot_utonia_appearance_0019_3f`, PointPillars `score_thresh=0.7`, `--appearance-mode utonia`, and `--appearance-weight 0.5`; generated KITTI result files successfully.
+- Ran full Utonia appearance MOT experiment `official_mot_pointpillar_score07_utonia_app05` with PointPillars `score_thresh=0.7`, `--appearance-mode utonia`, and `--appearance-weight 0.5`; runtime was about `24.5` minutes for `1896` frames, generated `9123` result rows and `490` tracks.
+- Evaluated `official_mot_pointpillar_score07_utonia_app05` with TrackEval: Car `HOTA=52.930`, `MOTA=41.246`, `IDF1=66.067`; Pedestrian `HOTA=23.423`, `MOTA=21.774`, `IDF1=36.930`.
+- Compared the full Utonia appearance run against the geometry-only PointPillars `score_thresh=0.7` baseline: Car was unchanged, while Pedestrian slightly worsened (`IDSW 118 -> 124`, `IDF1 37.242 -> 36.930`), indicating that Utonia should be used for targeted ambiguous/lost association rather than as an always-on additive cost.
+- Added `scripts/eval_utonia_detector_gap_recovery.py` to find detector-gap cases where a high-score detector update is available at frame `t-1` but missing at frame `t`, then initialize Utonia from the last detector box and evaluate Utonia-only fallback over short gaps.
+- Ran detector-gap recovery experiment `pointpillar_score07_gap_recovery_utonia_top8` with PointPillars high score `0.7`, low score `0.3`, up to `8` cases per class and `5` gap frames; selected `16` cases and `41` gap frames.
+- Detector-gap recovery result for high-score misses: overall Utonia accepted `100%` of frames, mean `3D IoU=0.4691`, median `3D distance=0.2238m`, and low-score detector match rate `85.4%`; Car mean `3D IoU=0.3859`, Pedestrian mean `3D IoU=0.5280`.
+- Added `--require-low-score-miss` to `scripts/eval_utonia_detector_gap_recovery.py` to isolate harder detector dropouts where the first missed frame also has no matching low-score detector box.
+- Ran harder detector-gap recovery experiment `pointpillar_score07_gap_recovery_utonia_no_low_score_top8`; selected `10` cases and `40` gap frames.
+- Hard no-low-score recovery result: overall Utonia accepted `100%` of frames, mean `3D IoU=0.3089`, median `3D distance=0.5961m`; Car mean `3D IoU=0.4363`, median distance `0.6303m`; Pedestrian mean `3D IoU=0.2664`, median distance `0.4509m`.
+- Updated `KITTI_MOT_REPORT.md` with detector-gap recovery methodology, commands, results, and the conclusion that Utonia is promising for short detector dropouts but needs support-point box refinement and should follow ByteTrack-style low-score continuation.
+- Added `KITTI_MOT_REPORT.md` summarizing the MOT pipeline, official TrackEval protocol, runs, metrics, findings, and next no-training steps.
+- Added elapsed-time and ETA progress reporting to `scripts/eval_kitti_sot_3d.py`; each tracklet line now prints `elapsed`, `eta`, and a per-track completion time.
+- Verified the ETA update with `conda run -n utonia python -m py_compile scripts/eval_kitti_sot_3d.py`.
+- Ran full official KITTI validation `official_full_lifecycle_gate_car12_ped25` with `--classes Car Pedestrian --metric-space 3d --lost-bad-frames 4 --lost-height-ratio 0.3 --car-gate-radius 12 --pedestrian-gate-radius 2.5`; runtime was `33m39s` for `182` tracklets and `12512` frames.
+- Full official validation result: overall `success_3d=30.9904`, `precision_3d=45.4723`, frame `lost_rate=0.0632`, `mean_3d_accuracy=14.1628`, `median_3d_accuracy=1.0359`.
+- Full official validation per-class result: `Car` `6424` frames, `success_3d=18.4138`, `precision_3d=20.3604`, frame `lost_rate=0.0968`, track `lost_track_rate=0.0917`; `Pedestrian` `6088` frames, `success_3d=44.2613`, `precision_3d=71.9703`, frame `lost_rate=0.0278`, track `lost_track_rate=0.0484`.
+- Generated full official validation failure report at `data/eval_sot_3d/official_full_lifecycle_gate_car12_ped25/official_failure_tracks_3d.csv` and `.md`; selected `22` representative failures, `17` Car and `5` Pedestrian, with reasons `14` `lost` and `8` `drift`.
+- Updated `KITTI_SOT_METRICS_REPORT.md` with the full official validation command, runtime, metrics, and baseline comparison.
+- Added fast official-class lifecycle/sparsity diagnostics for KITTI `Car` and `Pedestrian` experiments.
+- Updated `utonia/tracker.py` with sparse-aware target extraction controls, optional prototype freeze on sparse supports, recovery-after-lost controls, `lost_frames`, `sparse_mode`, and `recovered` state outputs.
+- Added a recovery safety gate in `utonia/tracker.py` so re-acquisition candidates must pass the same `height_collapse` / `jump_xy` bad-update checks before updating centroid and velocity.
+- Updated `scripts/eval_kitti_sot_3d.py` with per-frame diagnostics: `raw_box_support_points`, `filtered_box_support_points`, `bad_update`, `bad_update_reason`, `jump_xy`, `used_box_overlap`, `sparse_mode`, `recovered`, `pre_lost_window_min_support`, and `pre_lost_window_min_target_support`.
+- Added official-class experiment knobs to `scripts/eval_kitti_sot_3d.py`: `--pre-lost-window`, `--car-gate-radius`, `--pedestrian-gate-radius`, sparse fallback arguments, and recovery arguments.
+- Added support summary fields to `per_track.csv`, including min/median raw and filtered GT support, target support, pre-lost support, bad-update frame counts, sparse frame counts, and recovered frame counts.
+- Added `scripts/build_official_diagnostic_subset.py` to build a balanced fast subset from official failure tracks plus matched controls.
+- Added `scripts/analyze_official_subset_sparsity.py` to compare support-point distributions for failure and control groups.
+- Built `data/eval_sot_3d/diagnostic_kitti3d_strict_gt_none_20260519/official_diagnostic_subset.csv` with `40` official-class tracks: `20` failures and `20` controls.
+- Ran `official_subset_baseline` on the diagnostic subset: `3155` frames, `success_3d=36.7147`, `precision_3d=45.9548`, `lost_rate=0.4149`, `mean_3d_accuracy=19.1425`, `median_3d_accuracy=0.9499`.
+- Ran baseline sparsity analysis: failure `Car` median initial support `11.0` vs control `162.5`, failure `Car` median min filtered support `4.5` vs control `111.0`; failure `Pedestrian` median initial support `54.0` vs control `54.5`, failure `Pedestrian` median min filtered support `18.0` vs control `47.5`.
+- Ran `official_subset_less_aggressive_lost` with `--lost-bad-frames 4 --lost-height-ratio 0.3`: `success_3d=42.3534`, `precision_3d=56.6371`, `lost_rate=0.1759`, `mean_3d_accuracy=21.7400`, `median_3d_accuracy=0.3637`.
+- Ran `official_subset_sparse_fallback` with sparse support threshold `64`, sparse similarity `0.35`, cluster scale `2.0`, and sparse prototype freeze: `success_3d=37.2282`, `precision_3d=52.2195`, `lost_rate=0.2422`.
+- Ran `official_subset_recovery` with `--recovery-max-frames 10`; it reduced `lost_rate` to `0.0174` but exposed catastrophic recovery drift with `mean_3d_accuracy=4232733.5`.
+- Added the gated recovery fix and reran `official_subset_recovery_gated`: `success_3d=41.8257`, `precision_3d=56.8700`, `lost_rate=0.2187`, `mean_3d_accuracy=62.3518`.
+- Ran `official_subset_lifecycle_sparse` combining less aggressive lost detection and sparse fallback: `success_3d=37.0887`, `precision_3d=52.0705`, `lost_rate=0.1005`, `mean_3d_accuracy=17.3750`.
+- Ran `official_subset_class_gate_mid` with `--car-gate-radius 8 --pedestrian-gate-radius 2.5`: `success_3d=42.2203`, `precision_3d=57.6426`, `lost_rate=0.1921`, `mean_3d_accuracy=14.7289`.
+- Generated `official_failure_tracks_3d.csv/.md` and `official_sparsity_analysis.csv/.md` reports for the subset baseline, less-aggressive-lost, sparse-fallback, recovery, gated-recovery, lifecycle-sparse, and class-gate runs.
+- Updated `KITTI_SOT_METRICS_REPORT.md` with fast official subset experiment results, sparsity findings, and lifecycle conclusions.
+- Verified syntax in the `utonia` conda environment with `conda run -n utonia python -m py_compile utonia/tracker.py scripts/eval_kitti_sot_3d.py scripts/report_failure_tracks_3d.py scripts/build_official_diagnostic_subset.py scripts/analyze_official_subset_sparsity.py scripts/kitti_tracker_test.py`.
+- Ran focused lifecycle+gate experiment `official_subset_lifecycle_gate_mid` with `--lost-bad-frames 4 --lost-height-ratio 0.3 --car-gate-radius 8 --pedestrian-gate-radius 2.5`: `success_3d=44.6307`, `precision_3d=61.1680`, `lost_rate=0.0900`, `mean_3d_accuracy=12.5662`, `median_3d_accuracy=0.3241`.
+- Generated failure and sparsity reports for `official_subset_lifecycle_gate_mid`; Pedestrian failure tracks had `0` lost tracks, and remaining lost tracks were sparse Car cases.
+- Ran focused lifecycle+gate experiment `official_subset_lifecycle_gate_car12_ped25` with `--lost-bad-frames 4 --lost-height-ratio 0.3 --car-gate-radius 12 --pedestrian-gate-radius 2.5`: `success_3d=45.3376`, `precision_3d=62.2314`, `lost_rate=0.0434`, `mean_3d_accuracy=13.8385`, `median_3d_accuracy=0.3205`.
+- Generated failure and sparsity reports for `official_subset_lifecycle_gate_car12_ped25`; only `2` failure tracks remained `lost`, both Car, with failure-Car median initial support `11.0` and median min filtered support `4.5`.
+- Ran focused lifecycle+gate experiment `official_subset_lifecycle_gate_car12_ped4` with `--lost-bad-frames 4 --lost-height-ratio 0.3 --car-gate-radius 12 --pedestrian-gate-radius 4`: `success_3d=44.8399`, `precision_3d=61.3661`, `lost_rate=0.0656`, `mean_3d_accuracy=14.0471`, `median_3d_accuracy=0.3231`.
+- Generated failure and sparsity reports for `official_subset_lifecycle_gate_car12_ped4`; the wider Pedestrian gate did not improve over Pedestrian gate `2.5`.
+- Ran focused lifecycle+gate experiment `official_subset_lifecycle_gate_car12_ped15` with `--lost-bad-frames 4 --lost-height-ratio 0.3 --car-gate-radius 12 --pedestrian-gate-radius 1.5`: `success_3d=42.8843`, `precision_3d=57.8201`, `lost_rate=0.0979`, `mean_3d_accuracy=14.5333`, `median_3d_accuracy=0.3463`.
+- Generated failure and sparsity reports for `official_subset_lifecycle_gate_car12_ped15`; the tighter Pedestrian gate reintroduced a Pedestrian lost case and was worse than gate `2.5`.
+- Updated `KITTI_SOT_METRICS_REPORT.md` with focused lifecycle+gate results and selected `--lost-bad-frames 4 --lost-height-ratio 0.3 --car-gate-radius 12 --pedestrian-gate-radius 2.5` as the current best subset candidate for final validation.
+- Refocused `scripts/eval_kitti_sot_3d.py` defaults on official KITTI tracking classes: `Car` and `Pedestrian`; `Van` and `Cyclist` remain available when explicitly requested.
+- Added `--classes` and `--output-prefix` to `scripts/report_failure_tracks_3d.py`, with default class filtering set to official KITTI tracking classes.
+- Generated official-only failure report from `data/eval_sot_3d/diagnostic_kitti3d_strict_gt_none_20260519` with `--classes Car Pedestrian --output-prefix official_failure_tracks_3d`.
+- Official-only failure report output: `official_failure_tracks_3d.csv` and `official_failure_tracks_3d.md`; selected `20` tracks, `10` Car and `10` Pedestrian, all with failure reason `lost`.
+- Official-class strict 3D subset metrics from the diagnostic run: `Car` `6424` frames, `120` tracklets, `success_3d=17.7179`, `precision_3d=19.6132`, frame `lost_rate=0.2841`, track `lost_track_rate=0.2167`; `Pedestrian` `6088` frames, `62` tracklets, `success_3d=39.0839`, `precision_3d=62.0347`, frame `lost_rate=0.1904`, track `lost_track_rate=0.2419`.
+- Updated `KITTI_SOT_METRICS_REPORT.md` with the official KITTI tracking focus and official-only failure report outputs.
+- Added `scripts/report_failure_tracks_3d.py` to rank representative 3D SOT failure tracks from `per_track.csv` and `per_frame.csv`, using strict 3D overlap/distance columns when available.
+- Updated `scripts/kitti_tracker_test.py` to accept `--update-source none`, so diagnostic watch commands can reproduce the no-update evaluation protocol.
+- Verified `scripts/report_failure_tracks_3d.py` and `scripts/kitti_tracker_test.py` compile in the `utonia` conda environment.
+- Ran full strict diagnostic eval: `conda run -n utonia python scripts/eval_kitti_sot_3d.py --data-root /media/vladislav/KINGSTON/trackkitti/training --split test --init-source gt --update-source none --init-policy immediate --metric-space 3d --run-name diagnostic_kitti3d_strict_gt_none_20260519`.
+- Diagnostic strict 3D result: `206` tracklets, `14068` frames, `success_3d=27.8769`, `precision_3d=39.2136`, `mean_3d_accuracy=27.8637`, `median_3d_accuracy=1.6096`, and `lost_rate=0.2705`.
+- Diagnostic per-class strict 3D results: `Car` `success_3d=17.7179`, `precision_3d=19.6132`, `lost_rate=0.2841`; `Pedestrian` `success_3d=39.0839`, `precision_3d=62.0347`, `lost_rate=0.1904`; `Van` `success_3d=15.5008`, `precision_3d=15.9736`, `lost_rate=0.6579`; `Cyclist` `success_3d=68.3929`, `precision_3d=91.1039`, `lost_rate=0.0`.
+- Ran failure report on `data/eval_sot_3d/diagnostic_kitti3d_strict_gt_none_20260519`; generated `failure_tracks_3d.csv` and `failure_tracks_3d.md`.
+- Failure report selected `26` representative tracks: `8` Car, `8` Pedestrian, `5` Van, and `5` Cyclist; detected `21` `lost` failures and `5` `min_overlap` failures.
+- Updated `KITTI_SOT_METRICS_REPORT.md` with the diagnostic experiment, strict 3D results, and failure-report outputs.
+- Updated `scripts/eval_kitti_sot_3d.py` for fairer KITTI 3D SOT comparison: `Van` is no longer canonicalized into `Car` during tracklet construction, and the default evaluated classes are now `Car`, `Pedestrian`, `Van`, and `Cyclist`.
+- Added `--metric-space {3d,bev}` to `scripts/eval_kitti_sot_3d.py`; `3d` is now the default and summarizes Success with 3D IoU and Precision with full 3D center distance, while `bev` preserves the previous BEV-style summary.
+- Added per-frame `iou_3d` and `accuracy_3d` outputs while keeping `bev_overlap` and `bev_accuracy`.
+- Added an in-process point-cloud frame LRU cache to `scripts/eval_kitti_sot_3d.py` to reduce repeated KITTI `.bin` disk reads across tracklets.
+- Added `flush=True` to long-running evaluator progress prints so progress is visible under `conda run`.
+- Verified `scripts/eval_kitti_sot_3d.py` compiles in the `utonia` conda environment after the evaluator changes.
+- Ran strict 3D smoke evaluation: `conda run -n utonia python scripts/eval_kitti_sot_3d.py --data-root /media/vladislav/KINGSTON/trackkitti/training --sequences 0000 --classes Car Van Pedestrian Cyclist --init-source gt --update-source none --init-policy immediate --max-tracks 1 --max-track-frames 2 --metric-space 3d --run-name codex_smoke_strict3d_after_patch_20260519`; output had `success_3d=85.0`, `precision_3d=91.25`, and separate `class=Van`.
+- Validated updated KITTI test class counts without running the model: `Car=6424`, `Van=1248`, `Pedestrian=6088`, `Cyclist=308`, total `14068` frames.
+- Updated `KITTI_SOT_METRICS_REPORT.md` with the evaluator changes and smoke-test command.
+- Ran a fresh full KITTI 3D SOT-style evaluation with `conda run -n utonia python scripts/eval_kitti_sot_3d.py --data-root /media/vladislav/KINGSTON/trackkitti/training --split test --classes Car Pedestrian Cyclist --init-source gt --update-source none --init-policy immediate --run-name codex_kitti3d_test_gt_none_20260519`.
+- Full run output: `data/eval_sot_3d/codex_kitti3d_test_gt_none_20260519`; results were `206` tracklets, `14068` frames, `success_bev=32.0403`, `precision_bev=41.5217`, `mean_bev_accuracy=21.4570`, `median_bev_accuracy=1.5772`, and `lost_rate=0.2770`.
+- Extracted per-class metrics from the run: evaluator `Car` row has `7672` frames, `success_bev=19.0579`, `precision_bev=19.4183`; `Pedestrian` has `6088` frames, `success_bev=46.1293`, `precision_bev=66.7009`; `Cyclist` has `308` frames, `success_bev=76.9318`, `precision_bev=94.3994`.
+- Verified raw KITTI test-frame counts for sequences `0019` and `0020`: `Car=6424`, `Van=1248`, `Pedestrian=6088`, `Cyclist=308`; current evaluator merges `Van` into `Car`.
+- Compared the run against published KITTI 3D SOT methods from M2-Track, CDTracker, and BEVTrack references.
+- Added `KITTI_SOT_METRICS_REPORT.md` with the executed command, fresh metrics, comparison table, and prioritized issues.
+- Used the requested `utonia` conda environment for all Python checks and KITTI smoke tests.
+- Verified KITTI tracking dataset layout at `/media/vladislav/KINGSTON/trackkitti`, including `training/velodyne`, `training/calib`, `training/label_02`, and `testing/velodyne`.
+- Verified `training/velodyne` contains sequences `0000` through `0020`; sequence `0000` contains `154` LiDAR frames.
+- Verified runtime dependencies in `utonia`: PyTorch `2.5.0`, CUDA available on `NVIDIA GeForce RTX 3080 Laptop GPU`, NumPy `2.2.6`, OpenPCDet import, OpenCV import, and SciPy import.
+- Ran `conda run -n utonia python -m py_compile` for `utonia/tracker.py`, `scripts/kitti_tracker_test.py`, `scripts/eval_kitti_sot.py`, `scripts/eval_kitti_sot_3d.py`, `scripts/precompute_kitti_tracking_detections.py`, `scripts/render_kitti_sot_video.py`, and `scripts/kitti_detection_viz.py`.
+- Verified KITTI frame loading from `/media/vladislav/KINGSTON/trackkitti/training/velodyne/0000/000000.bin`: `(123397, 3)` finite `float32` points.
+- Verified existing PointPillars detections at `data/detections/pointpillar/npz/0000/000000.npz`: `39` boxes with labels `[1, 2, 3]`.
+- Ran 3D SOT smoke evaluation on KITTI sequence `0000`, Car class, GT init, no update, one track, three frames. Output: `data/eval_sot_3d/codex_smoke_20260519_gt_none`; metrics included `success_bev=84.1667`, `precision_bev=86.6667`, `lost_rate=0.0`.
+- Ran 3D SOT smoke evaluation on KITTI sequence `0000`, Car class, PointPillars init/update, one track, three frames. Output: `data/eval_sot_3d/codex_smoke_20260519_pointpillar`; the pipeline completed, but this detector-init smoke had poor metrics (`mean_bev_overlap=0.0`, `used_detection_rate=0.0`).
+- Ran 2D SOT smoke evaluation on KITTI sequence `0000`, Car class, GT init, no update, one track, three frames. Output: `data/eval_sot/codex_smoke_20260519_2d_gt_none`; metrics included `valid_rate=1.0`, `mean_iou_all=0.5180`, `lost_rate=0.0`.
+- Ran `scripts/kitti_tracker_test.py` on `/media/vladislav/KINGSTON/trackkitti/training/velodyne/0000` with GT init/update, target class `Car`, `--max-frames 2`, and `--no-spawn`; the smoke run completed.
+- Ran PointPillars detector precompute smoke on KITTI sequence `0000`, one frame, score threshold `0.1`, and confirmed outputs at `/home/vladislav/Documents/Utonia-tracker/data/detections_codex_smoke_20260519_abs/pointpillar/npz/0000/000000.npz` and `txt_lidar/0000/000000.txt`.
+- Observed that using a relative `--output_root` with `scripts/precompute_kitti_tracking_detections.py` writes relative to `third_party/OpenPCDet/tools` because the script changes directory internally; use an absolute output path to avoid ambiguity.
+- No source code changes were made during this KITTI smoke-test pass.
+
+## 2026-05-18
+- Inspected repository structure for the planned CV project: Utonia-based KITTI tracking.
+- Reviewed `utonia/tracker.py`, `scripts/kitti_tracker_test.py`, `scripts/eval_kitti_sot_3d.py`, `scripts/eval_kitti_sot.py`, `scripts/render_kitti_sot_video.py`, `scripts/precompute_kitti_tracking_detections.py`, `README.md`, and `OPENPCDET_DETECTIONS.md`.
+- Checked git state before analysis; existing user changes were present in `scripts/kitti_tracker_test.py` and untracked `scripts/eval_kitti_sot_3d.py`.
+- Ran syntax validation with `python3 -m py_compile` for the tracker and main KITTI scripts.
+- Verified the local Python command is `python3`; plain `python` is not available in this shell.
+- Verified local NumPy is `1.26.4`, where `np.trapezoid` is unavailable and `np.trapz` is available.
+- No functional code changes were made during this analysis pass.
+- Confirmed the requested conda environment `utonia` exists at `/home/vladislav/miniconda3/envs/utonia`.
+- Re-ran syntax validation through `conda run -n utonia python -m py_compile` for the tracker and main KITTI scripts.
+- Verified `utonia` env uses Python `3.10.20` and NumPy `2.2.6`; `np.trapezoid` is available there.

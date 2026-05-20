@@ -17,6 +17,7 @@ class TrackerState:
     support_height: float = 0.0
     status: str = "active"
     bad_frames: int = 0
+    lost_frames: int = 0
 
 
 class UtoniaTracker:
@@ -40,6 +41,14 @@ class UtoniaTracker:
         init_points: int = 64,
         min_points: int = 64,
         proto_momentum: float = 0.9,
+        sparse_support_threshold: int = 0,
+        sparse_sim_threshold: float = 0.45,
+        sparse_cluster_radius_scale: float = 1.5,
+        sparse_no_proto_update: bool = False,
+        recovery_max_frames: int = 0,
+        recovery_crop_radius_scale: float = 2.0,
+        recovery_gate_radius_scale: float = 2.0,
+        recovery_sim_threshold: float = 0.55,
     ) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.mode = mode
@@ -58,6 +67,14 @@ class UtoniaTracker:
         self.init_points = init_points
         self.min_points = min_points
         self.proto_momentum = proto_momentum
+        self.sparse_support_threshold = sparse_support_threshold
+        self.sparse_sim_threshold = sparse_sim_threshold
+        self.sparse_cluster_radius_scale = sparse_cluster_radius_scale
+        self.sparse_no_proto_update = sparse_no_proto_update
+        self.recovery_max_frames = recovery_max_frames
+        self.recovery_crop_radius_scale = recovery_crop_radius_scale
+        self.recovery_gate_radius_scale = recovery_gate_radius_scale
+        self.recovery_sim_threshold = recovery_sim_threshold
         self.model = model
         self.transform = None
         self.state = TrackerState()
@@ -174,6 +191,8 @@ class UtoniaTracker:
             "bad_update_reason": "",
             "jump_xy": 0.0,
             "used_box_overlap": None,
+            "sparse_mode": False,
+            "recovered": False,
         }
 
     def box_mask(self, coord: torch.Tensor, box: torch.Tensor) -> torch.Tensor:
@@ -278,6 +297,8 @@ class UtoniaTracker:
             "bad_update_reason": "",
             "jump_xy": 0.0,
             "used_box_overlap": None,
+            "sparse_mode": False,
+            "recovered": False,
         }
 
     def count_box_support_points(
@@ -313,19 +334,36 @@ class UtoniaTracker:
 
     def extract_target(
         self, coord: torch.Tensor, sim: torch.Tensor, score: torch.Tensor
-    ) -> tuple[torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, int, bool]:
         """Build a target mask around the highest-scoring anchor point."""
         anchor = torch.argmax(score)
         mask = (
             torch.linalg.norm(coord - coord[anchor], dim=1) < self.cluster_radius
         ) & (sim > self.sim_threshold)
         mask = self.filter_mask_by_height(coord, mask, min_points=self.min_points)
+        sparse_mode = False
+        if (
+            self.sparse_support_threshold > 0
+            and int(mask.sum()) < self.sparse_support_threshold
+        ):
+            sparse_mode = True
+            sparse_mask = (
+                torch.linalg.norm(coord - coord[anchor], dim=1)
+                < self.cluster_radius * self.sparse_cluster_radius_scale
+            ) & (sim > self.sparse_sim_threshold)
+            sparse_mask = self.filter_mask_by_height(
+                coord,
+                sparse_mask,
+                min_points=min(self.min_points, self.sparse_support_threshold),
+            )
+            if int(sparse_mask.sum()) > int(mask.sum()):
+                mask = sparse_mask
         if int(mask.sum()) < self.min_points:
             topk = torch.topk(score, k=min(self.min_points, score.numel())).indices
             mask = torch.zeros_like(mask)
             mask[topk] = True
             mask = self.filter_mask_by_height(coord, mask, min_points=self.min_points)
-        return mask, int(mask.sum())
+        return mask, int(mask.sum()), sparse_mode
 
     def update_state(
         self,
@@ -333,6 +371,7 @@ class UtoniaTracker:
         feat: torch.Tensor,
         mask: torch.Tensor,
         prototype_mask: torch.Tensor | None = None,
+        update_prototype: bool = True,
     ) -> None:
         """Update centroid/velocity from the target mask and the prototype from a support mask."""
         old_centroid = self.state.centroid.clone()
@@ -345,6 +384,8 @@ class UtoniaTracker:
             / centroid_weight.sum()
         )
         self.state.velocity = self.state.centroid - old_centroid
+        if not update_prototype:
+            return
         new_prototype = torch.sum(feat[support_mask] * support_weight[:, None], dim=0)
         self.state.prototype = F.normalize(
             self.proto_momentum * old_prototype
@@ -371,7 +412,78 @@ class UtoniaTracker:
             "bad_update_reason": "motion_only",
             "jump_xy": 0.0,
             "used_box_overlap": None,
+            "sparse_mode": False,
+            "recovered": False,
         }
+
+    def recovery_step(self, coord: np.ndarray) -> dict[str, np.ndarray | int | None]:
+        """Try to reacquire a lost track in a wider local search region."""
+        previous_status = self.state.status
+        original_crop_radius = self.local_crop_radius
+        original_gate_radius = self.gate_radius
+        self.local_crop_radius = original_crop_radius * self.recovery_crop_radius_scale
+        self.gate_radius = original_gate_radius * self.recovery_gate_radius_scale
+        try:
+            coord_t, feat, crop_indices = self.encode_frame(coord, center=self.predict_position())
+            sim = feat @ self.state.prototype
+            score = self.score_points(coord_t, feat)
+            mask, support_count, sparse_mode = self.extract_target(coord_t, sim, score)
+            mean_sim = float(sim[mask].mean().detach().cpu()) if int(mask.sum()) else -1.0
+            bad_update, bad_update_reason, jump_xy, support_height = self.get_bad_update_info(
+                coord_t,
+                feat,
+                mask,
+            )
+            if (
+                support_count >= self.min_points
+                and mean_sim >= self.recovery_sim_threshold
+                and not bad_update
+            ):
+                self.update_state(
+                    coord_t,
+                    feat,
+                    mask,
+                    update_prototype=not (sparse_mode and self.sparse_no_proto_update),
+                )
+                self.state.status = "active"
+                self.state.bad_frames = 0
+                self.state.lost_frames = 0
+                support_height = float((coord_t[mask, 2].max() - coord_t[mask, 2].min()).detach().cpu())
+                self.state.support_height = support_height
+                anchor_index = int(torch.argmax(score).detach().cpu())
+                return {
+                    "coord": coord_t.detach().cpu().numpy(),
+                    "sim": sim.detach().cpu().numpy(),
+                    "mask": mask.detach().cpu().numpy(),
+                    "centroid": self.state.centroid.detach().cpu().numpy(),
+                    "anchor_index": anchor_index,
+                    "crop_indices": crop_indices,
+                    "used_box": None,
+                    "status": self.state.status,
+                    "status_transition": f"{previous_status}->{self.state.status}",
+                    "support_height": support_height,
+                    "support_count": support_count,
+                    "bad_update": False,
+                    "bad_update_reason": "",
+                    "jump_xy": jump_xy,
+                    "used_box_overlap": None,
+                    "sparse_mode": sparse_mode,
+                    "recovered": True,
+                }
+        finally:
+            self.local_crop_radius = original_crop_radius
+            self.gate_radius = original_gate_radius
+
+        self.state.lost_frames += 1
+        state = self.motion_only_step()
+        reason = bad_update_reason if "bad_update_reason" in locals() and bad_update_reason else "recovery_failed"
+        state["bad_update"] = bool("bad_update" in locals() and bad_update)
+        state["bad_update_reason"] = f"recovery_failed:{reason}"
+        state["jump_xy"] = jump_xy if "jump_xy" in locals() else 0.0
+        state["support_count"] = support_count if "support_count" in locals() else 0
+        state["support_height"] = support_height if "support_height" in locals() else self.state.support_height
+        state["sparse_mode"] = sparse_mode if "sparse_mode" in locals() else False
+        return state
 
     def get_bad_update_info(
         self,
@@ -408,13 +520,18 @@ class UtoniaTracker:
     ) -> dict[str, np.ndarray | int | None]:
         """Track one frame and optionally use a matched detection box to refresh the prototype."""
         if self.state.status == "lost":
+            if (
+                self.recovery_max_frames > 0
+                and self.state.lost_frames < self.recovery_max_frames
+            ):
+                return self.recovery_step(coord)
             return self.motion_only_step()
 
         previous_status = self.state.status
         coord_t, feat, crop_indices = self.encode_frame(coord, center=self.predict_position())
         sim = feat @ self.state.prototype
         score = self.score_points(coord_t, feat)
-        mask, support_count = self.extract_target(coord_t, sim, score)
+        mask, support_count, sparse_mode = self.extract_target(coord_t, sim, score)
         bad_update, bad_update_reason, jump_xy, support_height = self.get_bad_update_info(
             coord_t,
             feat,
@@ -430,7 +547,9 @@ class UtoniaTracker:
             self.state.bad_frames += 1
             if self.state.bad_frames >= self.lost_bad_frames:
                 self.state.status = "lost"
+                self.state.lost_frames = 0
             motion_state["status_transition"] = f"{previous_status}->{self.state.status}" if previous_status != self.state.status else ""
+            motion_state["sparse_mode"] = sparse_mode
             return motion_state
         self.state.bad_frames = 0
 
@@ -454,7 +573,14 @@ class UtoniaTracker:
             ):
                 prototype_mask = detection_mask
                 used_box = box_t.detach().cpu().numpy()
-        self.update_state(coord_t, feat, mask, prototype_mask=prototype_mask)
+        update_prototype = not (sparse_mode and self.sparse_no_proto_update)
+        self.update_state(
+            coord_t,
+            feat,
+            mask,
+            prototype_mask=prototype_mask,
+            update_prototype=update_prototype,
+        )
         self.state.support_height = support_height
         anchor_index = int(torch.argmax(score).detach().cpu())
         return {
@@ -473,6 +599,8 @@ class UtoniaTracker:
             "bad_update_reason": "",
             "jump_xy": jump_xy,
             "used_box_overlap": used_box_overlap,
+            "sparse_mode": sparse_mode,
+            "recovered": False,
         }
 
     def track_sequence(

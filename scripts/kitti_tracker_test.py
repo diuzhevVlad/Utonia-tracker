@@ -51,6 +51,14 @@ TRACKER_PRESETS = {
 }
 
 
+STABLE_INIT_PRESETS = {
+    "Car": 20,
+    "Van": 20,
+    "Cyclist": 12,
+    "Pedestrian": 10,
+}
+
+
 def load_xyz(path: Path) -> np.ndarray:
     return np.fromfile(path, dtype=np.float32).reshape(-1, 4)[:, :3].copy()
 
@@ -222,6 +230,44 @@ def select_init_box(
     return boxes[best], f"{label_to_name(labels[best])} {scores[best]:.2f}"
 
 
+def find_init_frame(
+    frame_ids: list[int],
+    gt: dict[int, dict],
+    tracker: UtoniaTracker,
+    velodyne_dir: Path,
+    init_source: str,
+    detections_root: Path,
+    score_thresh: float,
+    calib: Calibration,
+    stable_min_points: int,
+    stable_consecutive: int,
+    init_policy: str,
+) -> tuple[int, np.ndarray, str, tuple[int, int] | None]:
+    streak = 0
+    for frame_id in frame_ids:
+        init_box, init_label = select_init_box(
+            source=init_source,
+            first_frame=frame_id,
+            gt_record=gt[frame_id],
+            calib=calib,
+            detections_root=detections_root,
+            score_thresh=score_thresh,
+        )
+        if init_policy == "immediate":
+            return frame_id, init_box, init_label, None
+
+        coord = load_xyz(velodyne_dir / f"{frame_id:06d}.bin")
+        raw_support, filtered_support = tracker.count_box_support_points(coord, init_box)
+        if filtered_support >= stable_min_points:
+            streak += 1
+            if streak >= stable_consecutive:
+                return frame_id, init_box, init_label, (raw_support, filtered_support)
+        else:
+            streak = 0
+
+    raise RuntimeError(f"No valid {init_policy} init frame found")
+
+
 def match_update_box(
     source: str,
     frame_id: int,
@@ -302,8 +348,26 @@ def main():
         help="Source of the initialization box on the first frame.",
     )
     parser.add_argument(
+        "--init-policy",
+        choices=["immediate", "stable"],
+        default="immediate",
+        help="When to initialize the tracker inside the GT tracklet.",
+    )
+    parser.add_argument(
+        "--stable-init-min-points",
+        type=int,
+        default=None,
+        help="Override the class-aware filtered support threshold used by stable init.",
+    )
+    parser.add_argument(
+        "--stable-init-consecutive",
+        type=int,
+        default=2,
+        help="How many consecutive frames must satisfy the stable init threshold.",
+    )
+    parser.add_argument(
         "--update-source",
-        choices=["gt", "pointpillar", "pointrcnn"],
+        choices=["none", "gt", "pointpillar", "pointrcnn"],
         default=None,
         help="Source of the per-frame matched box updates. Defaults to the init source.",
     )
@@ -432,18 +496,22 @@ def main():
         target_class,
         "box_height_filter_ratio",
     )
+    stable_init_min_points = args.stable_init_min_points or STABLE_INIT_PRESETS.get(
+        target_class,
+        STABLE_INIT_PRESETS["Car"],
+    )
 
     print(
         f"Tracking track_id={track_id} class={target_class} "
         f"gate_radius={gate_radius} cluster_radius={cluster_radius} "
         f"init_points={init_points} min_points={min_points} "
-        f"box_height_filter_ratio={box_height_filter_ratio}"
+        f"box_height_filter_ratio={box_height_filter_ratio} init_policy={args.init_policy}"
     )
 
-    update_source = args.update_source or args.init_source
+    update_source = args.update_source if args.update_source is not None else args.init_source
     detections_root = Path(args.detections_root) if args.detections_root else REPO_ROOT / "data" / "detections"
     init_detections_root = detections_root / args.init_source / "npz"
-    update_detections_root = detections_root / update_source / "npz"
+    update_detections_root = None if update_source == "none" else detections_root / update_source / "npz"
 
     tracker = UtoniaTracker(
         mode=args.tracker_mode,
@@ -457,17 +525,25 @@ def main():
         detection_overlap_threshold=args.detection_overlap_thresh,
         box_height_filter_ratio=box_height_filter_ratio,
     )
-    first_coord = load_xyz(velodyne_dir / f"{first_frame:06d}.bin")
-    init_box, init_label = select_init_box(
-        source=args.init_source,
-        first_frame=first_frame,
-        gt_record=gt[first_frame],
-        calib=calib,
+    first_frame, init_box, init_label, init_support = find_init_frame(
+        frame_ids=sequence_frame_ids,
+        gt=gt,
+        tracker=tracker,
+        velodyne_dir=velodyne_dir,
+        init_source=args.init_source,
         detections_root=init_detections_root / seq,
         score_thresh=args.score_thresh,
+        calib=calib,
+        stable_min_points=stable_init_min_points,
+        stable_consecutive=args.stable_init_consecutive,
+        init_policy=args.init_policy,
     )
+    first_coord = load_xyz(velodyne_dir / f"{first_frame:06d}.bin")
     init_state = tracker.initialize_from_box(first_coord, init_box)
-    gt_box = record_to_lidar_box(gt[first_frame], calib)
+    if init_support is not None:
+        print(
+            f"Stable init selected frame {first_frame} with support raw={init_support[0]} filtered={init_support[1]}"
+        )
 
     rr.init("utonia_kitti_tracker", spawn=not args.no_spawn)
 
@@ -519,20 +595,25 @@ def main():
         log_frame(first_frame, first_coord, init_state, gt[first_frame], matched_label=None)
 
     for frame_id in sequence_frame_ids[1:]:
+        if frame_id < first_frame:
+            continue
         coord = load_xyz(velodyne_dir / f"{frame_id:06d}.bin")
         pred_centroid = tracker.predict_position().detach().cpu().numpy()
         gt_record = gt.get(frame_id)
-        matched_box, matched_label, _ = match_update_box(
-            source=update_source,
-            frame_id=frame_id,
-            gt_record=gt_record,
-            target_class=target_class,
-            calib=calib,
-            detections_root=update_detections_root / seq,
-            score_thresh=args.score_thresh,
-            pred_centroid=pred_centroid,
-            match_radius=tracker.gate_radius,
-        )
+        matched_box = None
+        matched_label = None
+        if update_source != "none":
+            matched_box, matched_label, _ = match_update_box(
+                source=update_source,
+                frame_id=frame_id,
+                gt_record=gt_record,
+                target_class=target_class,
+                calib=calib,
+                detections_root=update_detections_root / seq,
+                score_thresh=args.score_thresh,
+                pred_centroid=pred_centroid,
+                match_radius=tracker.gate_radius,
+            )
         state = tracker.step(coord, detection_box=matched_box)
         if frame_id >= visible_start:
             log_frame(frame_id, coord, state, gt_record, matched_label)
